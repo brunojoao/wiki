@@ -1,0 +1,143 @@
+<!--
+title: API Boom
+description: API pública da Boom para parceiros e clientes.
+published: 1
+date: 2026-08-26T15:02:55.719Z
+tags: api
+editor: ckeditor
+dateCreated: 2025-10-31T14:59:23.837Z
+-->
+
+<p><strong>API Fica na porta:</strong> <code>3333</code> (Informação adicional, mas útil para contexto)</p>
+<p><strong>Kong (Proxy) fica na porta:</strong> <code>8400</code></p>
+<p><strong>Configuração do Kong (Admin API) fica na porta:</strong> <code>8401</code> (A porta <code>8402</code> é tipicamente o default do Kong para métricas, mas a porta padrão da <strong>Admin API</strong> é <code>8001</code> ou <code>8444</code>. O <code>deck</code> está usando <code><strong>8401</strong></code> nos seus comandos, então usaremos essa como a <strong>Admin API</strong>.)</p>
+<p><strong>Endpoint de Acesso configurado no Kong:</strong> <code>localhost:8400/v1</code> (Este é um <i>Route</i> e <i>Service</i> que será incluído no backup)</p>
+<p><strong>Ferramenta de Backup/Restore:</strong> <code>decK</code></p>
+<hr>
+<h2>💾 Tutorial: Backup e Restauração da Configuração do Kong Gateway com <code>decK</code> (Declarative Configuration)</h2>
+<p>O <code>decK</code> é a ferramenta oficial do Kong para gerenciar a configuração de forma declarativa, permitindo exportar o estado atual do Kong para um arquivo YAML (backup) e importar esse arquivo para restaurar ou sincronizar o estado (restore).</p>
+<h3>⚙️ Pré-requisitos e Configurações Chave</h3>
+<p>&nbsp;</p>
+<p>Para que os comandos do <code>decK</code> funcionem corretamente, é crucial entender as portas do Kong no contexto do Docker:</p>
+<figure class="table">
+  <table>
+    <thead>
+      <tr>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Componente</strong></th>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Porta no Host (Exemplo)</strong></th>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Porta no Container (Docker Network)</strong></th>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Uso pelo decK</strong></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Kong Proxy</strong></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>8400</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>8000</code> ou <code>8443</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Acesso do Cliente (Não é usado pelo <code>decK</code>)</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Kong Admin API</strong></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code><strong>8401</strong></code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>8001</code> ou <code>8444</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code><strong>http://kong:8401</strong></code> (Ponto de contato do <code>decK</code> para backup/restore)</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>API do seu Serviço</strong></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>3333</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>3333</code> (ou outra)</td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Endpoint final</td>
+      </tr>
+    </tbody>
+  </table>
+</figure>
+<blockquote>
+  <p><strong>Nota:</strong> Se você estiver usando um <i>docker-compose</i> ou <i>docker network</i> onde o container <code>kong</code> está acessível por <i>hostname</i>, o <code>kong-addr</code> no seu comando deve ser <code>http://kong:8401</code>. Se o <code>decK</code> não estiver na mesma rede ou estiver rodando diretamente no seu host, você precisará usar <code>http://localhost:8401</code>.</p>
+</blockquote>
+<p>&nbsp;</p>
+<h3>1️⃣ Fazendo o Backup (Dump) da Configuração</h3>
+<p>Este comando irá exportar toda a configuração de entidades do Kong (Services, Routes, Plugins, Consumers, etc.) para um arquivo YAML dentro do container <code>deck</code>.</p>
+<p>&nbsp;</p>
+<h4>➡️ Comando de Backup</h4>
+<p>&nbsp;</p>
+<pre><code class="language-plaintext">docker exec deck deck gateway dump \
+  --kong-addr http://kong:8401 \
+  --output-file /deck/kong.yaml \
+  --yes
+</code></pre>
+<figure class="table">
+  <table>
+    <thead>
+      <tr>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Parâmetro</strong></th>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Descrição</strong></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>docker exec deck</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Executa o comando no container <code>deck</code>.</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>deck dump</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Comando do <code>decK</code> para exportar a configuração.</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>--kong-addr http://kong:8401</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Especifica o endereço da <strong>Admin API</strong> do Kong.</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>--output-file /deck/kong.yaml</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Define o caminho e nome do arquivo de saída dentro do container.</td>
+      </tr>
+    </tbody>
+  </table>
+</figure>
+<p>&nbsp;</p>
+<h3>2️⃣ Validando o Arquivo de Configuração</h3>
+<p>Antes de restaurar, é uma boa prática validar a sintaxe do arquivo YAML para evitar erros.</p>
+<p>Bash</p>
+<p>&nbsp;</p>
+<pre><code class="language-plaintext">docker exec deck deck gateway validate /deck/kong.yaml
+</code></pre>
+<p>&nbsp;</p>
+<h3>3️⃣ Restaurando a Configuração (Sync)</h3>
+<p>Este comando irá ler o arquivo YAML e sincronizar o estado do Kong com o que está definido no arquivo. Ele <strong>adiciona, atualiza e remove</strong> entidades no Kong para que correspondam <strong>exatamente</strong> ao arquivo <code>kong.yaml</code>.</p>
+<p>&nbsp;</p>
+<h4>➡️ Comando de Restauração (Sync)</h4>
+<p>&nbsp;</p>
+<pre><code class="language-plaintext">docker exec deck deck gateway sync --kong-addr http://kong:8401 /deck/kong.yaml
+</code></pre>
+<figure class="table">
+  <table>
+    <thead>
+      <tr>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Parâmetro</strong></th>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Descrição</strong></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>deck sync</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Comando do <code>decK</code> para sincronizar o estado do Kong.</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>--kong-addr http://kong:8401</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Especifica o endereço da <strong>Admin API</strong> do Kong.</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><code>--state /deck/kong.yaml</code></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Define o caminho e nome do arquivo de configuração a ser importado.</td>
+      </tr>
+    </tbody>
+  </table>
+</figure>
+<p>&nbsp;</p>
+<h4>⚠️ Segurança: Simulação (Diff)</h4>
+<p>&nbsp;</p>
+<p>Sempre que possível, use o comando <code>diff</code> primeiro. Ele mostrará as alterações que o <code>sync</code> fará <strong>antes</strong> de aplicá-las.</p>
+<p>Bash</p>
+<p>&nbsp;</p>
+<pre><code class="language-plaintext">docker exec deck deck gateway diff --kong-addr http://kong:8401 /deck/kong.yaml
+</code></pre>
+<p>Isso garante que você não delete ou sobrescreva acidentalmente uma configuração importante. Apenas se o <code>diff</code> mostrar as mudanças esperadas, execute o comando <code>sync</code>.</p>

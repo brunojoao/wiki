@@ -1,0 +1,216 @@
+<!--
+title: Contratos - Arquitetura do Módulo
+description: Geração de contratos, placeholders, cláusulas e pegadinhas.
+published: 1
+date: 2026-08-26T15:03:19.667Z
+tags: arquitetura, contratos, mpdf
+editor: ckeditor
+dateCreated: 2026-06-26T19:28:50.613Z
+-->
+
+<h1>Módulo de Contratos — Arquitetura Técnica</h1>
+<p>Como funciona, tecnicamente, o módulo de <strong>Contratos/Documentos</strong> do <code>app.boomsistemas.com.br</code> (Zend Framework 2 / PHP 7.x): anatomia de um contrato, os <strong>dois motores de geração</strong>, placeholders, mPDF, tabelas, fluxos de customização e as principais pegadinhas. Leitura obrigatória antes de criar/alterar qualquer contrato.</p>
+<p>&nbsp;</p>
+
+<h2>1. Anatomia de um contrato</h2>
+<p>Cada contrato/documento é a soma de:</p>
+<pre><code class="language-plaintext">1 registro em sis_contrato      (metadados: descrição, template, view, fonte, margem, flags)
+ + 1 template HTML              public/template/&lt;nome&gt;.html  (~475 templates hoje)
+ + (opcional) 1 view .phtml     module/Application/view/application/contratos/&lt;nome&gt;.phtml
+ + &lt;option&gt; nos dropdowns        veiculo/edit.phtml, contratos/novo.phtml, contratos/clausula.phtml</code></pre>
+<p>O template é HTML com <strong>placeholders</strong> <code>%Nome%</code> que o backend substitui pelos dados (cliente, veículo, filial, valores...). O mPDF transforma o HTML final em PDF.</p>
+<p>&nbsp;</p>
+
+<h2>2. Princípio mestre — software de prateleira</h2>
+<p>O BoomSistemas é <strong>software de prateleira</strong>. Clientes pedem personalizações o tempo todo; o trabalho é resolver no <strong>menor nível possível</strong>. Hierarquia (do preferido ao mais restrito):</p>
+<ol>
+<li><strong>Template</strong> (<code>public/template/*.html</code>) — onde a personalização <strong>deve</strong> ficar sempre que possível.</li>
+<li><strong>View custom</strong> (<code>*.phtml</code>) — quando precisa de campos diferentes ou automação de frontend (JS). É o limite "tranquilo".</li>
+<li><strong>Backend</strong> (<code>ContratosTable.php</code>, controller) — <strong>evite</strong>. Já há muito <code>if (filial_id == ...)</code> legado; a meta é restringir.</li>
+</ol>
+<p><strong>Regra de ouro do backend:</strong> só altere a lógica se <strong>beneficiar todos os clientes</strong>. Adições <strong>genéricas</strong> (um placeholder novo lendo um campo do veículo, um fix amplo) podem ser feitas sem confirmar. Código <strong>específico de filial</strong> (<code>if (filial_id == X)</code>) deve ser evitado e <strong>sempre confirmado</strong> antes. Prefira a via neutra: placeholder gated por <strong>flag/campo postado</strong> em vez de <code>filial_id</code>.</p>
+<p>Outro princípio: <strong>prefira placeholders dinâmicos a texto fixo</strong> — mesmo quando o cliente manda o modelo já preenchido (aquele exemplo é só uma geração; o template serve a todas as filiais). Exceção: quando não existe chave que resolva o dado, ou o usuário orienta que é fixo.</p>
+<p>&nbsp;</p>
+
+<h2>3. Arquitetura — hierarquia usuário master → filiais</h2>
+<p>O sistema não tem o nível grupo/empresa → filiais. Cada <strong>filial é subordinada a um "usuário master" (cliente)</strong> via <code>user_id</code>. Relação canônica: <strong><code>user_id</code> (master) → <code>filial_id</code></strong> (várias filiais por master).</p>
+<ul>
+<li>O que personaliza <strong>conteúdo</strong> (cláusulas, contrato personalizado) costuma chavear por <strong><code>user_id</code></strong>.</li>
+<li>O que é <strong>acesso/edição</strong> nas telas usa <strong><code>filial_id</code></strong> (<code>$this-&gt;usuario-&gt;filial_id_real</code>).</li>
+<li><strong>Procuradores</strong> (<code>sis_filial_procurador</code>) chaveiam por <code>filial_id</code>, NÃO por master.</li>
+</ul>
+<p>⚠️ Nunca assuma — verifique a coluna real (<code>user_id</code> vs <code>filial_id</code>) da tabela-alvo antes de filtrar.</p>
+<p>&nbsp;</p>
+
+<h2>4. Arquivos-chave</h2>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Arquivo</th><th style="border:1px solid;">Papel</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>Controller/ContratosController.php</code></td><td style="border:1px solid;">Entrada do módulo. Actions: <code>novoAction</code>/<code>geracontratoAction</code> (tela "Gerar Contratos"), <code>saveAction</code> (salva/gera pela view), <code>gerarAction</code> (gera pela página do veículo), <code>visualizarAction</code>/<code>emailAction</code> (PDF), <code>editAction</code>, <code>clausulaAction</code>/<code>saveclausulaAction</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/ContratosTable.php</code></td><td style="border:1px solid;"><strong>Núcleo da lógica.</strong> <code>saveContrato()</code> (substituição de placeholders — passo comum), <code>geraDataContrato($contrato,$veiculo)</code> (motor da página do veículo), <code>getContrato()</code>, <code>getContratoConfig()</code>, <code>getContratoPersonalizado()</code>, <code>getClausulaFilial()</code>, <code>saveClausula()</code>, <code>renderBlocoRepetivel()</code>, helpers <code>prose*()</code>, <code>montaItensPagamento()</code>. Contém os <strong>arrays hardcoded</strong> de ids.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/ContratosItemTable.php</code></td><td style="border:1px solid;"><code>saveItens()</code>/<code>getItens()</code> — persistem os campos postados (chave→valor) para o re-render do <code>visualizar</code>. Array <code>$preservaCaixa</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>public/template/*.html</code></td><td style="border:1px solid;">~475 templates. Onde fica a personalização preferencial.</td></tr>
+<tr><td style="border:1px solid;"><code>view/application/contratos/*.phtml</code></td><td style="border:1px solid;">Views de campos por contrato (<code>compra.phtml</code>, <code>repasse.phtml</code>, <code>consignacao.phtml</code>, <code>compravenda-mer.phtml</code>, etc.) + <code>novo.phtml</code>, <code>edit.phtml</code>, <code>clausula.phtml</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>view/application/veiculo/edit.phtml</code></td><td style="border:1px solid;">Selects de contrato na página do veículo (seções compra/venda).</td></tr>
+</tbody>
+</table></figure>
+<p>Motor de PDF: <code>use Mpdf;</code> no <code>ContratosController</code>.</p>
+<p>&nbsp;</p>
+
+<h2>5. Tabelas</h2>
+<p><strong><code>sis_contrato</code></strong> — o registro/metadados do contrato:</p>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Coluna</th><th style="border:1px solid;">Uso</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>contrato_id</code></td><td style="border:1px solid;">PK. É o id cravado nas views (hardcoded).</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_descricao</code></td><td style="border:1px solid;">Nome do contrato.</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_template</code></td><td style="border:1px solid;">Caminho do HTML (ex: <code>/template/compravenda.html</code>).</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_clausula</code></td><td style="border:1px solid;"><strong>Fallback</strong> da cláusula (o texto "bom" vem de <code>sis_clausula_contrato</code>).</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_view</code></td><td style="border:1px solid;">View .phtml de campos (fluxo "Gerar Contratos").</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_fonte</code></td><td style="border:1px solid;"><strong><code>default_font_size</code> do mPDF em pt</strong> (NÃO é família de fonte). Ex: compravenda usa 7.</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_size</code></td><td style="border:1px solid;">Formato da página: <code>A4</code> ou <code>[larg,alt]</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_margin</code></td><td style="border:1px solid;"><code>left,right,top,bottom</code> em mm (margem da página no mPDF). Default <code>10,10,5,5</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_paginacao</code></td><td style="border:1px solid;">Liga numeração de página.</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_venda</code></td><td style="border:1px solid;"><code>1</code> = saída (após venda), <code>0</code> = entrada (compra).</td></tr>
+<tr><td style="border:1px solid;"><code>contrato_procurador</code></td><td style="border:1px solid;"><code>1</code> em procurações.</td></tr>
+</tbody>
+</table></figure>
+<p>⚠️ Os campos <code>contrato_fonte</code>/<code>contrato_size</code>/<code>contrato_margin</code> são do registro <strong>base, compartilhado por todas as filiais</strong>.</p>
+<p><strong><code>sis_contrato_configuracao</code></strong> — override de fonte/tamanho/margem <strong>por filial</strong> (não há UI; INSERT manual em produção): <code>contrato_config_id</code>, <code>filial_id</code>, <code>contrato_id</code>, <code>contrato_config_size</code>, <code>contrato_config_fonte</code> (aceita decimal), <code>contrato_config_margin</code> (ou NULL → cai na base). Usado em <code>getContratoConfig()</code> nas 3 actions de PDF e na assinatura digital. O override só vale se <code>contrato_config_fonte != ""</code>.</p>
+<p><strong><code>sis_clausula_contrato</code></strong> — cláusula personalizada por master: <code>clausula_contrato_id</code> (PK), <code>contrato_id</code>, <code>user_id</code>, <code>clausula_contrato</code> (text).</p>
+<p><strong><code>sis_contrato_personalizado</code></strong> (legado — só produção) e <strong><code>sis_filial_procurador</code></strong> (procuradores) — ver seções 11 e 10.</p>
+<p>&nbsp;</p>
+
+<h2>6. ⚠️ Duas telas, DOIS motores de geração</h2>
+<p>Este é o conceito mais importante. O mesmo contrato pode ser gerado por dois caminhos diferentes, com <strong>fontes de dados distintas</strong>:</p>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Tela</th><th style="border:1px solid;">Caminho</th><th style="border:1px solid;">Fonte dos dados</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><strong>Gerar Contratos</strong> (<code>/contratos/novo</code>)</td><td style="border:1px solid;"><code>geracontratoAction</code> → renderiza a <code>contrato_view</code> → <code>saveAction</code></td><td style="border:1px solid;">Campos <strong>postados pela view</strong> (+ enriquecimento de veículo/filial/cliente por CPF). Qualquer input nomeado resolve seu <code>%Nome%</code>.</td></tr>
+<tr><td style="border:1px solid;"><strong>Página do veículo</strong> (<code>/veiculo/editar/{id}</code>)</td><td style="border:1px solid;"><code>gerarAction</code> → <code>ContratosTable::geraDataContrato($contrato,$veiculo)</code></td><td style="border:1px solid;"><strong>NÃO usa a view.</strong> Gera de um conjunto <strong>fixo</strong> de chaves do servidor (veículo + venda + filial). A view custom é ignorada aqui.</td></tr>
+</tbody>
+</table></figure>
+<p><strong>Consequência:</strong> não invente placeholders custom (<code>%CNH_Cliente%</code>, <code>%Opcionais%</code>...) para um contrato gerado na <strong>página do veículo</strong> — saem <strong>literais</strong>. Use só chaves que <code>geraDataContrato</code> produz. Se precisar do dado nos dois fluxos, adicione a chave em <code>geraDataContrato</code> (de forma genérica).</p>
+<p>⚠️ <strong>Se um contrato existe nas duas telas, gere o PDF pelos dois fluxos e dê <code>diff</code></strong> (os motores divergem em silêncio). Atenção a lookup de pessoa, <code>%Valor%</code>, datas e <code>%Clausula%</code>. Um placeholder não-resolvido sai literal no PDF.</p>
+<p>Passo final <strong>comum aos dois</strong>: <code>saveContrato()</code> — faz <code>mb_strtoupper</code> em todos os valores postados (~linha 278) e roda os <code>str_ireplace</code> dos placeholders, o swap PJ e os motores de bloco.</p>
+<p>&nbsp;</p>
+
+<h2>7. Placeholders — chaves de <code>geraDataContrato</code> (página do veículo)</h2>
+<p>Conjunto fixo disponível no motor da página do veículo:</p>
+<ul>
+<li><strong>Comprador/venda:</strong> <code>Cliente, CPF_Cliente, RG_Cliente, CPFCNPJ_Cliente, Email_Cliente, Tel_Cliente, Cel_Cliente, Nacionalidade_Cliente, Profissao_Cliente, EstadoCivil_Cliente, Nascimento_Cliente, Endereco_Cliente, Endereco_Num_Cliente, Bairro_Cliente, UF_Cliente, CEP_Cliente, Endereco_Complemento, DtVenda, HrVenda, Valor, Vendedor</code></li>
+<li><strong>Veículo:</strong> <code>Marca, Veiculo, Modelo, Ano, AnoFab, AnoMod, Placa, Chassi, Motor, Km, Cor, Renavam, Combustivel, Potencia, Origem, DtEntrada, AntigoProprietario, CPF_AntigoProprietario</code></li>
+<li><strong>Filial:</strong> <code>Filial, Filial_Endereco, Filial_Num_Endereco, Filial_Bairro, CEP_Filial, Filial_Telefone, CNPJ_Filial, UF_Filial, Filial_Logo, Procurador, ...</code></li>
+<li><strong>Data/especiais:</strong> <code>dd, mm</code> (nome do mês), <code>yyyy, hh</code>, <code>%Logo%, %Clausula%, %Observacoes%</code>.</li>
+</ul>
+<p>As chaves do cliente/outorgante são inicializadas como <strong>string vazia</strong> no array inicial → na ausência de dados saem em branco (não literais). Ao criar placeholders de cliente novos, dê default vazio aqui também.</p>
+<p>&nbsp;</p>
+
+<h2>8. ⚠️ mPDF — limitações de CSS</h2>
+<ul>
+<li><strong>Não</strong> suporta <code>writing-mode</code> nem <code>transform: rotate</code>. Para texto vertical use a propriedade própria <code>text-rotate: 90;</code> inline.</li>
+<li><code>colgroup</code>/<code>table-layout:fixed</code> <strong>não são confiáveis</strong> para células vazias (colapsam). Ponha <code>width</code> explícito em cada <code>&lt;td&gt;</code> (com <code>&amp;nbsp;</code> nas vazias).</li>
+<li>Especificidade: <code>.classe td { border:none }</code> vence <code>.box { border }</code>. Use seletor mais específico ou borda inline.</li>
+<li>Checkbox/quadrado: <code>&lt;div&gt;</code> vazio com borda colapsa — use <code>&lt;td&gt;</code> com borda.</li>
+<li>Linha de assinatura: evite runs longos de <code>_</code>; use <code>border-top</code> em <code>&lt;div&gt;</code>/<code>&lt;td&gt;</code> de largura fixa.</li>
+<li>Renderiza bem: tabelas com <code>border</code>, <code>colspan</code>/<code>rowspan</code>, imagens via URL (S3), <code>&lt;strong&gt;</code>, <code>&lt;u&gt;</code>, <code>text-rotate</code>.</li>
+</ul>
+<p><strong>Casing:</strong> <code>saveContrato</code> faz <code>mb_strtoupper</code> em TODOS os valores postados antes do replace. O texto estático do template fica como escrito, mas todo <strong>valor</strong> sai em CAIXA ALTA. Para frase com conectivo minúsculo + dado maiúsculo, compute o placeholder <strong>no model</strong> (não monte a frase pronta na view).</p>
+<p>&nbsp;</p>
+
+<h2>9. Mecanismos genéricos de template (em <code>ContratosTable.php</code>, comuns aos 2 fluxos)</h2>
+<ul>
+<li><strong>Bloco repetível <code>%Pagamentos% ... %/Pagamentos%</code></strong> (<code>renderBlocoRepetivel</code> ~928): o template define o layout de UMA linha; o motor repete por item. <strong>Aditivo</strong> (só dispara se o template contém a tag). Unifica 4 fontes: select de pagamento, carnê, financiamento, veículo na troca. Tags amigáveis: <code>%FormaPagamento%</code>, <code>%ValorPagamento%</code>, <code>%ParcelasPagamento%</code>, <code>%DataPagamento%</code>... + <strong>passthrough cru</strong> (<code>%nome_da_coluna%</code> de cada registro).</li>
+<li><strong>Condicional <code>%Se_Campo% ... %/Se_Campo%</code></strong> (~906): renderiza o miolo só se o campo top-level não-vazio.</li>
+<li><strong>Condicional por item <code>%SeItem_Campo% ... %/SeItem_Campo%</code></strong> (~1631): idem, mas dentro de um bloco repetível (chave do item).</li>
+<li><strong><code>%Campo__ExtensoNumero%</code></strong> (~553): número por extenso sem "reais", p/ qualquer campo postado.</li>
+<li><strong><code>%ObservacoesRaw%</code></strong> (~438): observações via <code>nl2br</code>, sem rótulo e <strong>preservando o caixa</strong>.</li>
+<li><strong>Prosa editável</strong>: <code>%DescricaoPagamento%</code>, <code>%DocumentacaoTransferencia%</code> (com despachante opt-in via checkbox). Padrão "campo de prosa editável" (helper <code>prose*()</code> no model → textarea pré-preenchida no Gerar Contratos → motor substitui no <code>saveContrato</code> preservando caixa). Ao usar, adicione o campo a <code>$preservaCaixa</code> em <code>ContratosItemTable</code>.</li>
+<li><strong><code>%PagamentoTable%</code> (legado, ~184 templates)</strong>: montado hardcoded em vários ramos. Engessado — <strong>não mexer sem necessidade</strong>.</li>
+</ul>
+<p><strong>Modelos-PADRÃO recomendados:</strong> MeR <strong>226</strong> (consignação) e <strong>227</strong> (compra e venda) — lapidados por advogada, usam todos os mecanismos acima. Para um cliente que peça <strong>esses modelos</strong>, <strong>reuse o mesmo <code>contrato_id</code></strong> (só adicione a filial à visibilidade das options + clone de cláusula opcional), em vez de criar do zero.</p>
+<p>&nbsp;</p>
+
+<h2>10. Cláusulas (<code>%Clausula%</code>)</h2>
+<p>Resolvido por <code>getClausulaFilial(filial_id, contrato_id)</code> (~1406): LEFT JOIN em <code>sis_clausula_contrato</code> por <code>cc.user_id = filial.user_id AND cc.contrato_id</code>. Se há registro → texto personalizado da filial; senão → fallback da coluna <code>sis_contrato.contrato_clausula</code> (geralmente defasado).</p>
+<p>⚠️ Ao <strong>clonar</strong> um <code>sis_contrato</code>, a coluna é copiada, mas o id novo <strong>não tem linha</strong> em <code>sis_clausula_contrato</code> → filiais que personalizaram passam a ver o fallback. <strong>Correção:</strong> clonar os registros de cláusula do id base para o novo (derivando o <code>user_id</code> da filial). Cada <code>contrato_id</code> tem linha própria → edições são independentes (<code>saveClausula</code> dá UPDATE pela PK).</p>
+<p>&nbsp;</p>
+
+<h2>11. Dois fluxos de customização — use SEMPRE o NOVO</h2>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Fluxo</th><th style="border:1px solid;">Como</th><th style="border:1px solid;">Quando</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><strong>NOVO (correto)</strong></td><td style="border:1px solid;"><code>contrato_id</code> novo + descrição própria + template próprio + <code>&lt;option&gt;</code> nos dropdowns.</td><td style="border:1px solid;">Sempre. O contrato aparece como <strong>opção distinta e nomeada</strong> — o cliente vê que foi feito pra ele (é cobrado à parte).</td></tr>
+<tr><td style="border:1px solid;"><strong>ANTIGO (legado)</strong></td><td style="border:1px solid;"><code>sis_contrato_personalizado</code> mapeia <code>(filial_id, contrato_id base)</code> → nome de template custom; <code>getContratoPersonalizado()</code> faz <code>str_replace</code> no caminho dentro de <code>saveContrato</code>.</td><td style="border:1px solid;">Só <strong>reconhecer/migrar</strong>. Não criar novos. O cliente continua selecionando a opção PADRÃO e o template é trocado por baixo (invisível).</td></tr>
+</tbody>
+</table></figure>
+<p>⚠️ <strong>Templates curinga</strong>: alguns nomes em <code>sis_contrato_personalizado</code> (ex: <code>compravenda-semprop-anterior</code>, família "sem proprietário anterior") são apontados por <strong>dezenas de filiais</strong>. Antes de editar qualquer template referenciado lá, conte quantas filiais usam (<code>GROUP BY contrato_personalizado</code>). Se &gt; 1, é curinga → <strong>NÃO edite no lugar</strong>; crie um <code>&lt;base&gt;-&lt;cliente&gt;.html</code> e aponte só o registro do cliente.</p>
+<p>&nbsp;</p>
+
+<h2>12. ⚠️ Arrays hardcoded em <code>ContratosTable.php</code></h2>
+<p>No topo do model há arrays de <code>contrato_id</code> que <strong>gateiam placeholders</strong> no <code>geraDataContrato</code> (fluxo da página do veículo). Se o id novo não estiver no array certo, o placeholder sai <strong>literal</strong> — mesmo com o flag <code>contrato_procurador=1</code>.</p>
+<ul>
+<li><code>$procuracoesArray</code> — habilita <code>%ProcuradorData%</code>, <code>%Procurador%</code>, <code>%ClausulaProcurador_2%</code>. Todo novo id de procuração entra aqui. ⚠️ <strong>Efeito colateral:</strong> também liga injeção de <strong>prosa</strong> no endereço do outorgante ("à RUA", "nº", "bairro", "CEP", "e RG", "residente em"). Só inclua ids cujo template descreve o outorgante em <strong>prosa corrida</strong> — se o cliente aparece em <strong>tabela com rótulos</strong>, as palavras <strong>duplicam</strong>.</li>
+<li><code>$comprasArray</code> — habilita <code>%PagamentoTable%</code> no contrato de <strong>compra</strong> (entrada). Todo novo id de compra entra aqui.</li>
+<li><code>$consignacoesArray</code> — análogo p/ consignação.</li>
+<li><strong>Venda NÃO usa array</strong> — é gated por <code>contrato_venda == 1</code>.</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>13. Procuradores (<code>sis_filial_procurador</code>)</h2>
+<p>Chaveado por <strong><code>filial_id</code></strong> (não por master). Dados via <code>FilialProcuradorTable::findForFilialContract($filialId)</code> (JOIN com <code>sis_pessoa_cadastro</code>). <strong>Sempre pela filial do veículo, sem fallback</strong> — filiais irmãs NÃO compartilham procuradores.</p>
+<ul>
+<li><code>%Procurador%</code> tem <strong>default = o master/loja</strong>. Só é substituído quando há procurador cadastrado (1º procurador, key 0, gated por <code>filial_fl_procuracao == 1</code>); os demais vão p/ <code>%Procurador_2%</code>.</li>
+<li>"Desativar master" (<code>filial_fl_procuracao</code>) <strong>não</strong> zera o master sozinho — só troca quando há procurador para o lugar.</li>
+<li>Diagnóstico comum: filial sem procurador em <code>sis_filial_procurador</code> → procurador não aparece E master "não sai". Permissão é necessária mas não suficiente; depende do cadastro naquela filial.</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>14. Pessoa Física vs Jurídica — dois cenários</h2>
+<ul>
+<li><strong>(A) Outorgante É a própria PJ → swap automático:</strong> quando <code>Tipo_Cliente == 2</code>, <code>saveContrato</code> procura <code>&lt;template&gt;-juridica.html</code>; se existir, usa no lugar do PF. Há ~87 templates <code>-juridica.html</code>. Basta criá-los — o seletor já dispara o swap.</li>
+<li><strong>(B) Outorgante PF que é DONO da PJ → menção, não swap:</strong> mantém CPF/RG e acrescenta "proprietário da empresa X, CNPJ Y". Usa view custom com checkbox <code>fl_pj</code> + placeholder <code>%MencaoEmpresa%</code> resolvido no model (não na view, por causa do casing).</li>
+</ul>
+<p>Campos novos postados <strong>sobrevivem ao re-render</strong> do <code>visualizar</code>: <code>saveItens</code> grava todo o POST genericamente e <code>getItens</code> devolve — sem precisar de coluna nova.</p>
+<p>&nbsp;</p>
+
+<h2>15. Passo a passo — criar um contrato novo de filial (fluxo NOVO)</h2>
+<ol>
+<li><strong>Achar o contrato base</strong> equivalente em <code>sis_contrato</code> (ex: repasse=10, garantia=4, compravenda=7, consignação=9, procuração entrada=1 / saída=8, envelope=13). ⚠️ Procuração de entrada e saída são <strong>templates diferentes</strong> — confirme o <code>contrato_template</code> no banco (o rótulo da option engana).</li>
+<li><strong>Definir o próximo <code>contrato_id</code></strong> — não confie só em <code>MAX()</code>; confira os ids referenciados nas 3 views (grep). Use o 1º id livre acima do maior referenciado.</li>
+<li><strong>Criar o template</strong> <code>public/template/&lt;nome&gt;-&lt;cliente&gt;.html</code> a partir do base (respeite as limitações do mPDF).</li>
+<li><strong>INSERT em <code>sis_contrato</code></strong> copiando atributos do base.</li>
+<li><strong>Decidir a <code>contrato_view</code></strong>: manter a base, criar custom (campo novo/prefill) ou reaproveitar uma existente.</li>
+<li><strong>Adicionar a <code>&lt;option&gt;</code></strong> dentro do bloco da filial (<code>if(grupo_acesso_id == 1 || filial_id_real == &lt;FILIAL&gt;)</code>) em: <code>veiculo/edit.phtml</code> (seção compra/venda conforme entrada/saída), <code>contratos/novo.phtml</code>, e <code>contratos/clausula.phtml</code> <strong>só se tem <code>%Clausula%</code></strong>. <strong>Não</strong> mexer em <code>contratos/edit.phtml</code> (o select ali é só exibição).</li>
+<li><strong>Registrar o id nos arrays hardcoded</strong> de <code>ContratosTable.php</code> se for procuração/compra/consignação (seção 12).</li>
+<li><strong>Clonar as cláusulas</strong> da filial (base→novo id) em <code>sis_clausula_contrato</code> se tem <code>%Clausula%</code>.</li>
+<li><strong>Validar</strong>: <code>php -l</code> nas views (PHP 7.x) e <strong>gerar o PDF no navegador local você mesmo</strong> — zero <code>%placeholder%</code> literal, cada dado da fonte certa.</li>
+<li><strong>Produção</strong>: o <strong>código</strong> (templates, views, arrays) vai por deploy git; os <strong>dados</strong> (<code>sis_contrato</code>, <code>sis_clausula_contrato</code>...) o usuário roda — você mostra o SQL <strong>inline no chat</strong>.</li>
+</ol>
+<p>&nbsp;</p>
+
+<h2>16. Validação no navegador (local)</h2>
+<ul>
+<li>URL <code>http://boomsistemas.local:7000</code>. Login admin <code>kendji@boomsistemas.com.br</code> (no local qualquer senha vale se o e-mail for válido).</li>
+<li><strong>Fluxo da página do veículo</strong> (exercita <code>geraDataContrato</code>): <code>/veiculo/editar/&lt;veiculo_id&gt;</code> → setar <code>#contrato_id</code> → <code>$('#form-contrato').submit()</code> → PDF abre em nova aba (mPDF inline). Para saída, use veículo vendido (<code>veiculo_status=2</code> + venda ativa) para o <code>%Cliente%</code> puxar o comprador.</li>
+<li><strong>Fluxo "Gerar Contratos"</strong> (<code>/contratos/novo</code>, usa os campos da view): setar <code>#veiculo_id</code>/<code>#veiculo_placa</code>/<code>#contrato_id</code> → "Pesquisar" carrega a view → preencher → submit → PDF em <code>/contratos/visualizar/{id}</code>. Selecione o contrato pelo <strong>value</strong> real (rótulos duplicam).</li>
+<li>Leia o PDF (screenshot) e só declare "validado" depois de conferir. Limpe os contratos de teste depois (<code>UPDATE sis_veiculo_contrato SET veiculo_contrato_status=0 ...</code> no local).</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>17. Regras de banco (local x produção)</h2>
+<ul>
+<li>Trabalhe no <strong>banco local</strong> (container <code>mariadb</code>, db <code>boomsistemas</code>). Produção (<code>DBGATE_CON5_*</code>) é <strong>réplica read-only</strong> — nunca escreva.</li>
+<li><strong>Mudanças de dados de contratos</strong> (<code>sis_contrato</code>, <code>sis_contrato_personalizado</code>, <code>sis_contrato_configuracao</code>, <code>sis_clausula_contrato</code>): <strong>NUNCA gere arquivo <code>.sql</code> em <code>SQLs/</code></strong>. Aplique no local e <strong>mostre o SQL inline no chat</strong> — o usuário roda em produção pelo DBGate.</li>
+<li>⚠️ <strong>CRLF em cláusulas de produção</strong>: cláusulas antigas usam <code>\r\n</code>; um <code>REPLACE</code> cujo alvo cruza quebra de linha falha em prod. Prefira alvos de UMA linha ou UPDATE setando a cláusula inteira (valide por round-trip MD5).</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>18. Pegadinhas que já queimaram (lições)</h2>
+<ul>
+<li><strong><code>%Valor%</code> em contrato de compra</strong> diverge entre motores: "Gerar Contratos" posta <code>veiculo_valor_entrada</code> (correto); <code>geraDataContrato</code> usava <code>veiculo_valor_venda</code> no ramo de compra (corrigido via <code>comprasArray</code>). Sempre confira <strong>de qual campo do veículo</strong> o valor vem.</li>
+<li><strong>Lookup de pessoa por filial, não por usuário logado</strong>: o autopreenchimento divergia só para admin porque buscava pelo usuário; alinhado a <code>getPessoaDocumentoFilial(filial_do_veículo, doc)</code>.</li>
+<li><strong>Duplicatas em <code>sis_pessoa_cadastro</code></strong>: várias cópias do mesmo documento sob o mesmo master. O lookup passou a ordenar por <code>pessoa_data_update DESC</code> (lê a cópia editada mais recente). Risco residual no procurador (<code>pessoa_id</code> fixo).</li>
+<li><strong>Dessincronização local x produção</strong>: ids são hardcoded nas views; podem divergir entre ambientes. Antes de "reservar" um id, cheque as views E o banco dos dois lados.</li>
+<li><strong>O rótulo da <code>&lt;option&gt;</code> pode mentir</strong> sobre o que o id é (ex: id 218 rotulado "Procuração Compra" mas é procuração de venda da Rei-Car). Confirme o registro real + o <code>.html</code>.</li>
+</ul>

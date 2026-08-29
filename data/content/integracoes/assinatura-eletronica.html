@@ -1,0 +1,58 @@
+<!--
+title: Assinatura Eletrônica
+description: Fluxo de assinatura eletrônica de documentos.
+published: 1
+date: 2026-08-26T15:03:11.389Z
+tags: assinatura
+editor: ckeditor
+dateCreated: 2025-12-04T14:58:10.887Z
+-->
+
+<p>📄 Como Testar Assinatura Eletrônica</p>
+<h3>Visão Geral</h3>
+<p>Este guia detalha o processo completo para configurar e testar as assinaturas eletrônicas no sistema.</p>
+<p><strong>Link da Documentação Oficial:</strong> <a href="https://plugsign.readme.io/reference/post-send-request-2">Referência PlugSign</a></p>
+<h3>Pré-requisitos</h3>
+<p>Acesso ao sistema com <strong>permissões de administrador</strong> ou configurador.</p>
+<p>Credenciais de acesso (<strong>usuário</strong> e <strong>senha</strong>) para login.</p>
+<hr>
+<h3>Processo de Configuração</h3>
+<h4>1. Acessar a Configuração da Filial</h4>
+<p>Você pode acessar a configuração da Filial de duas formas:</p>
+<p><strong>Opção A: Link Direto (Exemplo)</strong></p>
+<blockquote>
+  <p><code>http://boomsistemas.local:7000/filial-assinatura/1611</code></p>
+</blockquote>
+<p><strong>Opção B: Através da Listagem</strong></p>
+<p>Acesse o menu <strong>Filiais</strong>.</p>
+<p>Localize a filial desejada na listagem.</p>
+<p>Clique no ícone de configurações (<strong>três linhas verticais</strong>) no lado direito.</p>
+<p>Selecione a opção <strong>Assinatura</strong>.</p>
+<p>&nbsp;</p>
+<h4>2. Configurar a Assinatura PlugSign</h4>
+<p>Dentro da página de assinatura da filial:</p>
+<p>Gere uma <strong>senha</strong> para acesso ao PlugSign.</p>
+<p>Ative o recebimento de notificações, marcando as opções:</p>
+<p>✅ <strong>Email</strong></p>
+<p>✅ <strong>WhatsApp</strong></p>
+<p>&nbsp;</p>
+<h4>3. Testar no PlugSign (Portal Externo)</h4>
+<p>Acesse o portal do PlugSign e realize um teste de envio diretamente pela plataforma:</p>
+<p><strong>Portal:</strong> <a href="https://app.plugsign.com.br/">https://app.plugsign.com.br/</a></p>
+<p><strong>Faça login usando:</strong></p>
+<p><strong>Usuário:</strong> O mesmo configurado no passo anterior.</p>
+<p><strong>Senha:</strong> A senha gerada no passo anterior.</p>
+<p>Realize os testes de assinatura necessários no portal.</p>
+<p>&nbsp;</p>
+<h4>4. Gerar e Testar Contrato no Sistema</h4>
+<p>Para testar a geração do contrato <i>diretamente no seu sistema</i>:</p>
+<p>Acesse o menu de <strong>Veículos</strong>.</p>
+<p>Selecione um veículo da listagem.</p>
+<p>Clique no botão <strong>Contrato</strong>.</p>
+<p>Prossiga com as telas seguindo o fluxo normal de geração do contrato.</p>
+<blockquote>
+  <p>O sistema irá <strong>gerar e enviar o contrato</strong> para assinatura, testando a integração completa.</p>
+</blockquote>
+<hr>
+<h3>⚠️ Observações Finais</h3>
+<p><strong>Importante:</strong> Certifique-se de que as notificações por <strong>Email</strong> e <strong>WhatsApp</strong> estão devidamente <strong>ativadas</strong> (Passo 2) antes de iniciar qualquer teste.</p>

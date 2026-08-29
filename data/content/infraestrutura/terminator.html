@@ -1,0 +1,204 @@
+<!--
+title: Terminator
+description: Configuração do terminal e acesso aos servidores.
+published: 1
+date: 2026-08-26T15:03:10.065Z
+tags: terminal
+editor: ckeditor
+dateCreated: 2025-10-31T15:24:40.646Z
+-->
+
+<p>runojoao@brunojoao-pc:~/.config/terminator$ cat config<br>&nbsp;</p>
+<pre><code class="language-plaintext">[global_config]
+  enabled_plugins = LaunchpadBugURLHandler, LaunchpadCodeURLHandler, APTURLHandler, CustomCommandsMenu
+  suppress_multiple_term_dialog = True
+[keybindings]
+  go_up = &lt;Alt&gt;KP_8
+  go_down = &lt;Alt&gt;KP_2
+  go_left = &lt;Alt&gt;KP_4
+  go_right = &lt;Alt&gt;KP_6
+[profiles]
+  [[default]]
+    background_darkness = 0.25
+    cursor_color = "#aaaaaa"
+  [[alertProduction]]
+    background_color = "#000617"
+    cursor_color = "#aaaaaa"
+[layouts]
+  [[default]]
+    [[[window0]]]
+      type = Window
+      parent = ""
+    [[[child1]]]
+      type = Terminal
+      parent = window0
+      command = ""
+  [[Bruno]]
+    [[[child0]]]
+      type = Window
+      parent = ""
+      order = 0
+      position = 0:0
+      maximised = True
+      fullscreen = False
+      size = 1920, 1007
+      title = brunojoao@brunojoao-pc: ~
+      last_active_window = True
+    [[[child1]]]
+      type = Notebook
+      parent = child0
+      order = 0
+      labels = NEW, OLD, LIVRE, PRODUCTION
+      last_active_term = b00962f9-4818-40b2-abe0-8514d0a6dc26, 9921ddb0-a664-4c4e-9817-7518bc73861b, f7c08cbf-902f-46ef-8e7c-14dcbf460083, 6fa0c251-7cfb-485d-96e4-6e279b861fa2
+      active_page = 2
+    [[[terminal2]]]
+      type = Terminal
+      parent = child1
+      order = 0
+      profile = default
+      uuid = b00962f9-4818-40b2-abe0-8514d0a6dc26
+      command = ""
+      directory = boom_docker_stack/Projects/boomsistemas_ci4
+    [[[terminal3]]]
+      type = Terminal
+      parent = child1
+      order = 1
+      profile = default
+      uuid = 9921ddb0-a664-4c4e-9817-7518bc73861b
+      command = ""
+      directory = boom_docker_stack/Projects/app.boomsistemas.com.br
+    [[[terminal4]]]
+      type = Terminal
+      parent = child1
+      order = 2
+      profile = Novo perfil
+      uuid = f7c08cbf-902f-46ef-8e7c-14dcbf460083
+      directory = ""
+      command = ""
+    [[[child5]]]
+      type = HPaned
+      parent = child1
+      order = 3
+      position = 919
+      ratio = 0.47989556135770234
+    [[[terminal6]]]
+      type = Terminal
+      parent = child5
+      order = 0
+      profile = alertProduction
+      uuid = 4763e642-4e2a-4583-b39c-974039eb879b
+      directory = ""
+    [[[child7]]]
+      type = VPaned
+      parent = child5
+      order = 1
+      position = 482
+      ratio = 0.5
+    [[[terminal8]]]
+      type = Terminal
+      parent = child7
+      order = 0
+      profile = alertProduction
+      uuid = 6fa0c251-7cfb-485d-96e4-6e279b861fa2
+    [[[terminal9]]]
+      type = Terminal
+      parent = child7
+      order = 1
+      profile = alertProduction
+      uuid = fa04263d-c208-4f33-8f77-fa92fd5e2f6f
+[plugins]
+  [[CustomCommandsMenu]]
+    [[[HOSTINGER]]]
+      enabled = True
+      name = HOSTINGER
+      command = ssh -p 65002 u647249441@147.79.84.211
+      position = 0
+    [[[NordVPN_ON]]]
+      enabled = True
+      name = NordVPN_ON
+      command = nordvpn connect us10308
+      position = 1
+    [[[NordVPN_OFF]]]
+      enabled = True
+      name = NordVPN_OFF
+      command = nordvpn disconnect
+      position = 2
+    [[[DEV_Boom_Sistemas_Local]]]
+      enabled = True
+      name = DEV_Boom_Sistemas_Local
+      command = cd ~/boom_docker_stack/Projects/app.boomsistemas.com.br &amp;&amp; nvim
+      position = 3
+    [[[SERVER_STAGING]]]
+      enabled = True
+      name = SERVER_STAGING
+      command = ssh -i ~/keys/dev-linux.pem ubuntu@54.176.4.83
+      position = 4
+    [[[BoomSistemasCi]]]
+      enabled = True
+      name = BoomSistemasCi
+      command = cd ~/boom_docker_stack/Projects/boomsistemas_ci4 &amp;&amp; nvim
+      position = 5
+    [[[SERVER_PRODUCTION_REDIS_LEGADO]]]
+      enabled = True
+      name = SERVER_PRODUCTION_REDIS_LEGADO
+      command = ssh -i ~/keys/new-prod-sp.pem ubuntu@54.233.59.49
+      position = 6
+    [[[SLOWLog Download Main]]]
+      enabled = True
+      name = SLOWLog Download Main
+      command = scp -i ~/keys/new-prod-sp.pem ubuntu@18.228.80.150:~/boom_docker_stack_production/logs-php/www-slow.log ~/Downloads/
+      position = 7
+    [[[SLOWLog Download Slave]]]
+      enabled = True
+      name = SLOWLog Download Slave
+      command = scp -i ~/keys/new-prod-sp.pem ubuntu@54.207.200.116:~/boom_docker_stack_production/logs-php/www-slow.log ~/Downloads/
+      position = 8
+    [[[KONG EXPORT]]]
+      enabled = True
+      name = KONG EXPORT
+      command = '''docker exec deck deck gateway dump \
+  --kong-addr http://kong:8401 \
+  --output-file /deck/kong.yaml \
+  --yes'''
+      position = 9
+    [[[KONG SYNC]]]
+      enabled = True
+      name = KONG SYNC
+      command = '''docker exec deck deck gateway sync --kong-addr http://kong:8401 /deck/kong.yaml
+'''
+      position = 10
+    [[[KONG DIFF]]]
+      enabled = True
+      name = KONG DIFF
+      command = '''docker exec deck deck gateway diff --kong-addr http://kong:8401 /deck/kong.yaml
+'''
+      position = 11
+    [[[EC2 - BoomProduction MAIN]]]
+      enabled = True
+      name = EC2 - BoomProduction MAIN
+      command = ssh -i ~/keys/new-prod-sp.pem ubuntu@18.228.80.150
+      position = 12
+    [[[EC2 - BoomProduction Slave]]]
+      enabled = True
+      name = EC2 - BoomProduction Slave
+      command = ssh -i ~/keys/new-prod-sp.pem ubuntu@54.207.200.116
+      position = 13
+    [[[EC2 - KONG PRODUCTION]]]
+      enabled = True
+      name = EC2 - KONG PRODUCTION
+      command = ssh -i ~/keys/new-prod-sp.pem ec2-user@56.126.19.37
+      position = 14
+    [[[EC2 - API]]]
+      enabled = True
+      name = EC2 - API
+      command = ssh -i ~/keys/new-prod-sp.pem ec2-user@52.67.152.88
+      position = 15
+	[[[DUMP TO STAGING]]]
+	  enabled = True
+	  name = DUMP TO STAGING
+	  command = '''scp -i ~/keys/dev-linux.pem ~/dumps/export/dump.sql ubuntu@54.176.4.83:~/boom_docker_stack_staging/dumps &amp;&amp; ssh -i ~/keys/dev-linux.pem ubuntu@54.176.4.83 " \
+				echo 'DROP DATABASE boomsistemas; CREATE DATABASE boomsistemas;' | docker exec -i mariadb mysql -u root -p95175321 &amp;&amp; \
+				docker exec -i mariadb mysql -u root -p95175321 boomsistemas &lt; /home/ubuntu/boom_docker_stack_staging/dumps/dump.sql &amp;&amp; \
+				rm /home/ubuntu/boom_docker_stack_staging/dumps/dump.sql"'''
+				position = 16
+</code></pre>

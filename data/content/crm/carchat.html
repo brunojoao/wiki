@@ -1,0 +1,134 @@
+<!--
+title: CarChat
+description: Integração de atendimento CarChat.
+published: 1
+date: 2026-08-26T15:03:02.373Z
+tags: crm
+editor: ckeditor
+dateCreated: 2025-10-24T14:11:10.503Z
+-->
+
+<p><code>No use-bruno da pra testar o webhook, troque o número para não enviar para o cliente.</code><br><br><strong>🧠 Mini Tutorial — Integração com API Carchat</strong></p>
+<p>A classe <code>CarChat</code> serve pra se conectar à <strong>API de Integração de Leads da Carchat</strong> (<code>https://api.carchat.com.br/</code>).</p>
+<p>Ela já usa o <code>GuzzleHttpV7\Client</code> pra fazer requisições HTTP com segurança e timeout controlado.<br>&nbsp;</p>
+<h3><strong>⚙️ Como funciona</strong></h3>
+<h4>Estrutura principal:</h4>
+<p>A classe possui dois métodos principais:</p>
+<ol>
+  <li><code><strong>ativarLoja(array $params)</strong></code></li>
+</ol>
+<p>Endpoint: <code>POST /lojas/ativar</code></p>
+<ul>
+  <li>Objetivo: registrar ou ativar uma loja na Carchat.</li>
+  <li>Retorno: um token (<code>carchat_loja_token</code>) usado nas próximas requisições (como o envio de leads).</li>
+  <li><code><strong>enviarLead(string $xAuthToken, array $leadData)</strong></code></li>
+</ul>
+<p>&nbsp;</p>
+<p>Endpoint: <code>POST /leads/</code></p>
+<ul>
+  <li>Objetivo: enviar informações de um lead para a loja correspondente.</li>
+  <li>Requer o <code>X-Auth-Token</code> obtido no passo anterior (<code>ativarLoja</code>).</li>
+</ul>
+<p>&nbsp;</p>
+<h3><strong>🧩 Requisitos</strong></h3>
+<ul>
+  <li>PHP 7.4+</li>
+  <li>Dependência: <code>"guzzlehttp/guzzle": "^7.0"</code></li>
+  <li>Endpoint base já configurado:</li>
+</ul>
+<p>&nbsp;</p>
+<pre><code class="language-php">  public const API_BASEURL = "https://api.carchat.com.br/";
+</code></pre>
+<h3><strong>🚀 Exemplo de uso prático</strong></h3>
+<h4>1️⃣ Ativar ou registrar uma loja</h4>
+<p>Exemplo de chamada:</p>
+<p>&nbsp;</p>
+<pre><code class="language-php">use Application\Libraries\CarChat;
+
+$carchat = new CarChat();
+
+$params = [
+  "usuario" =&gt; "testeuser",
+  "senha" =&gt; "123456",
+  "nome_loja" =&gt; "Minha Loja Teste",
+  "cnpj" =&gt; "12345678000190",
+  "store_token" =&gt; "teste123",
+  "origin_crm" =&gt; "use-bruno",
+  "urlFeed" =&gt; null
+];
+
+$response = $carchat-&gt;ativarLoja($params);
+
+print_r($response);
+</code></pre>
+<p><strong>Resposta esperada (sucesso):</strong></p>
+<p>&nbsp;</p>
+<pre><code class="language-plaintext">{
+  "success": true,
+  "data": {
+    "carchat_loja_token": "eyJhbGciOiJIUzI..."
+  }
+}
+</code></pre>
+<p>Esse token (<code>carchat_loja_token</code>) será usado no método <code>enviarLead()</code> como <code>X-Auth-Token</code>.</p>
+<h4>2️⃣ Enviar um lead</h4>
+<p>&nbsp;</p>
+<pre><code class="language-php">$xAuthToken = "eyJhbGciOiJIUzIUz..."; // Token retornado no passo anterior
+
+$leadData = [
+  "store_token" =&gt; "teste123",
+  "lead" =&gt; [
+    "nome_cliente" =&gt; "Bruno Costa",
+    "numero_cliente" =&gt; "11999999999",
+    "email_cliente" =&gt; "bruno@teste.com",
+    "portal" =&gt; "OLX",
+    "veiculo_interesse" =&gt; [
+      [
+        "id" =&gt; "123",
+        "marca" =&gt; "Chevrolet",
+        "modelo" =&gt; "Onix",
+        "cor" =&gt; "Prata",
+        "ano" =&gt; 2023
+      ]
+    ]
+  ]
+];
+
+$response = $carchat-&gt;enviarLead($xAuthToken, $leadData);
+
+print_r($response);
+</code></pre>
+<p><strong>Resposta esperada (sucesso):</strong></p>
+<p>&nbsp;</p>
+<pre><code class="language-plaintext">{
+  "success": true,
+  "statusCode": 201,
+  "data": { ... lead salvo ... }
+}
+</code></pre>
+<h3><strong>🧪 Testes — Endpoint </strong><code><strong>use-bruno</strong></code></h3>
+<p>Você pode testar diretamente esses endpoints no projeto <code><strong>use-bruno</strong></code>.</p>
+<p>➡️ Basta ativar a rota de teste existente lá que consome o <code>CarChat</code>:</p>
+<p>&nbsp;</p>
+<pre><code class="language-php">$carChat = new \Application\Libraries\CarChat();
+
+// Teste de ativação
+dd($carChat-&gt;ativarLoja([...]));
+
+// Teste de lead
+dd($carChat-&gt;enviarLead($token, [...]));
+</code></pre>
+<p>Ou, se preferir, usar ferramentas como <strong>Bruno</strong> (cliente REST open-source inspirado no Postman) pra testar os endpoints diretamente:</p>
+<ul>
+  <li>Endpoint: <code>https://api.carchat.com.br/lojas/ativar</code></li>
+  <li>Endpoint: <code>https://api.carchat.com.br/leads/</code></li>
+  <li>Exemplo de payload: disponível no código acima</li>
+</ul>
+<p>📘 A documentação oficial da API também lista todas as propriedades e exemplos de payloads completos:</p>
+<p>👉 <a href="https://api.carchat.com.br/docs#/">https://api.carchat.com.br/docs#/</a><br>&nbsp;</p>
+<h3><strong>🧾 Dica extra</strong></h3>
+<ul>
+  <li>O método <code>fireGuzzle()</code> já converte os dados enviados para <strong>JSON</strong> se você passar <code>$isJson = true</code>.</li>
+  <li>Todos os retornos são arrays associativos, prontos para serem interpretados no backend.</li>
+  <li>As exceções são capturadas e logadas via <code>handleException()</code> ou <code>handleLog()</code> (já tratadas no código).</li>
+</ul>

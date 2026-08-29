@@ -1,0 +1,206 @@
+<!--
+title: Zoho Mail - Entrada de Leads por E-mail
+description: Pipeline e-mail -> Zoho -> webhook -> parser: roteamento por remetente, parsers por origem e a pegadinha da lista limitada.
+published: 1
+date: 2026-08-27T02:42:16.129Z
+tags: arquitetura, crm, leads, webhook, zoho
+editor: ckeditor
+dateCreated: 2025-12-29T13:38:06.725Z
+-->
+
+<h1>Zoho Mail — Entrada de Leads por E-mail</h1>
+
+<p><strong>Primeiro esclarecimento, porque quase todo mundo erra:</strong> isso <strong>não é o Zoho CRM</strong>. É o <strong>Zoho Mail</strong>. O sistema usa a caixa de e-mail da filial no Zoho como canal de captação: os portais (OLX, Webmotors, iCarros, Mobiauto…) mandam o lead <em>por e-mail</em>, o Zoho dispara um webhook de saída para a Boom a cada e-mail recebido, e um parser extrai nome/telefone/e-mail do corpo HTML da mensagem.</p>
+
+<p>Evidência no código (<code>Model/ZohoTable.php</code>):</p>
+
+<pre><code>protected $zohoAuth = "https://accounts.zoho.com/oauth/v2";
+protected $zohoApi  = "https://mail.zoho.com/api";
+
+// scopes OAuth
+"scope" =&gt; "ZohoMail.accounts.ALL,ZohoMail.folders.ALL,ZohoMail.messages.ALL,ZohoMail.attachments.ALL"</code></pre>
+
+<p>É por isso que esse caminho é frágil: <strong>a fonte da verdade é um e-mail em HTML</strong>, que o portal pode mudar de layout quando quiser, sem avisar.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  P["Portal<br/>(OLX, Webmotors, iCarros...)"] -->|e-mail| Z["Caixa Zoho Mail<br/>da filial"]
+  Z -->|webhook de saida| W["POST /webhook/zoho/:id<br/>ApiController::zohoAction"]
+  W --> AUD["sis_crm_webhook<br/>(guarda o body cru)"]
+  W --> R{"fromAddress"}
+  R -->|== filial_crm_siteproprio| L20["leadInicial(origem 20)"]
+  R -->|achou em<br/>sis_crm_origem_remetente| LO["leadInicial(origem N)"]
+  R -->|nao achou| LT["leadTransacional()"]
+  L20 --> PARSE["parser do HTML"]
+  LO --> PARSE
+  PARSE --> LEAD["sis_crm_lead"]
+</code></pre>
+</div>
+
+<h2>O webhook</h2>
+
+<p>Rota (<code>module.config.php</code>): <code>/webhook/zoho[/:id]</code> → <code>ApiController::zohoAction()</code>, HTTPS.</p>
+
+<p>O <code>:id</code> <strong>é a autenticação</strong> — não existe token nem assinatura. Ele é o <code>filial_crm_email_id</code>, resolvido por <code>FilialCrmTable::getCrmByIdEmail()</code>:</p>
+
+<pre><code>$email_id = preg_replace("/[^0-9]/", "", $email_id);
+// ...
+->where("f.filial_crm = 1")
+->where("fc.filial_crm_email_id = {$email_id}");</code></pre>
+
+<p>O valor é interpolado direto na query — o que segura injeção aqui é o <code>preg_replace</code> que reduz tudo a dígitos, não um prepared statement. Funciona, mas é uma proteção que depende de aquela linha nunca ser removida.</p>
+
+<h3>Guards, em ordem</h3>
+
+<ol>
+<li>Não é <code>POST</code> ou <code>:id</code> vazio → responde <strong>200</strong> e sai.</li>
+<li>Filial não encontrada pelo <code>:id</code> → loga e responde <strong>200</strong>. (Há um comentário no código sobre um ID que enche o log: <code>3EB688188B98F055FE9CA2C8B7BCA37C</code> — "ativo, mas não está no sistema". Note que ele é <em>hexadecimal</em>: o <code>preg_replace</code> vira uma sequência de dígitos que não bate com nada.)</li>
+<li><code>forceAsyncAndContinue()</code> — devolve a resposta e continua processando em background.</li>
+<li><code>$body['sender']</code> vazio → loga e responde <strong>200</strong>.</li>
+</ol>
+
+<p><strong>Todos os caminhos respondem 200, inclusive os de erro.</strong> Isso é intencional (evita retry em loop do Zoho), mas significa que <strong>lead perdido não gera erro em lugar nenhum visível</strong> — só uma linha de log. Quando alguém disser "o lead não entrou", não existe HTTP 4xx/5xx para procurar.</p>
+
+<h2>A pegadinha da "Lista de dados limitada"</h2>
+
+<p>Na configuração do <strong>webhook de saída</strong> do Zoho existe a opção:</p>
+
+<blockquote><p><em>"Publique apenas a lista de dados limitados, como detalhes de assunto, de, para e hora do e-mail"</em></p></blockquote>
+
+<p><strong>Essa opção tem que ficar DESMARCADA.</strong> O motivo é direto: marcada, o Zoho manda só metadados (assunto, remetente, destinatário, horário) e <strong>não manda o corpo do e-mail</strong>. E o corpo é exatamente de onde tudo é extraído:</p>
+
+<pre><code>$bodyWebhook['html'] = trim(preg_replace('/\s+/', ' ',
+    (string)(strip_tags((string) $bodyWebhook['html'] ?? ''))));</code></pre>
+
+<p>Sem <code>html</code>, o parser recebe string vazia e não acha nome, telefone nem e-mail do cliente. O lead ou não é criado, ou nasce vazio — e, de novo, o webhook responde 200. Marcar essa caixa é a causa mais comum de "configurei e não entra lead nenhum".</p>
+
+<h2>Roteamento: e-mail do remetente decide a origem</h2>
+
+<p>Depois de gravar o body, <code>zohoAction()</code> decide o que fazer olhando o <code>fromAddress</code>:</p>
+
+<pre><code>if ($dataFilial['filial_crm_siteproprio'] == $body['fromAddress']) {
+    $this->getModel("crm-table")->leadInicial($dataFilial, 20, $body);   // site próprio
+} else {
+    $origem = $this->getModel("crm-table")->getOrigemRemetente($body['fromAddress']);
+    if ($origem) {
+        $this->getModel("crm-table")->leadInicial($dataFilial, $origem['crm_origem_id'], $body);
+    } else {
+        $this->getModel("crm-table")->leadTransacional($dataFilial, $body);  // fallback
+    }
+}</code></pre>
+
+<p><code>getOrigemRemetente()</code> consulta <code>sis_crm_origem_remetente</code> com <code>INNER JOIN sis_crm_origem</code> filtrando <code>crm_origem_status = 1</code>. Ou seja: <strong>desativar uma origem faz os e-mails dela caírem no fallback transacional</strong>, não pararem de chegar.</p>
+
+<h3>Mapa remetente → origem (produção)</h3>
+
+<table>
+<thead><tr><th>Origem</th><th>Key</th><th>E-mail remetente</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>boom</code></td><td>noreply@boomveiculos.com.br</td></tr>
+<tr><td>2</td><td><code>olx</code></td><td>noreply@olx.com.br</td></tr>
+<tr><td>3</td><td><code>mercadolivre</code></td><td>nao-responder@mercadolivre.com<br/>no-responder@mercadolibre.com</td></tr>
+<tr><td>4</td><td><code>icarros</code></td><td>carros@icarros.com.br</td></tr>
+<tr><td>5</td><td><code>autoline</code></td><td>noreply@autoline.com.br</td></tr>
+<tr><td>6</td><td><code>mobiauto</code></td><td>contato@mobiauto.com.br</td></tr>
+<tr><td>7</td><td><code>usadosbr</code></td><td>propostas@usadosbr.com</td></tr>
+<tr><td>8</td><td><code>comprecar</code></td><td>sendmail@comprecar.com.br</td></tr>
+<tr><td>9</td><td><code>meucarronovo</code></td><td>contato@relacionamento.meucarronovo.com.br</td></tr>
+<tr><td>10</td><td><code>chavesnamao</code></td><td>nospam@chavesnamao.com.br</td></tr>
+<tr><td>11</td><td><code>carrosp</code></td><td>noreply@carsp.com.br</td></tr>
+<tr><td>18</td><td><code>socarrao</code></td><td>nao-responder@socarrao.com.br</td></tr>
+<tr><td>19</td><td><code>webmotors</code></td><td>alertaproposta@webmotors.com.br</td></tr>
+<tr><td>25</td><td><code>karvi</code></td><td>ola@karvi.com</td></tr>
+<tr><td>35</td><td><code>napista</code></td><td>noreply@napista.com.br</td></tr>
+<tr><td>46</td><td><code>leadfy</code></td><td>email@leadfy.me</td></tr>
+<tr><td>54</td><td><code>meta-instagram</code></td><td>willan.costa@v4company.com</td></tr>
+<tr><td>56</td><td><code>temusados</code></td><td>temusados@temusados.com.br</td></tr>
+<tr><td>59</td><td><code>seminovosbh</code></td><td>no-reply@seminovos.com.br</td></tr>
+</tbody>
+</table>
+
+<p>(Lista parcial — a tabela completa está em <code>sis_crm_origem_remetente</code>. Também existem entradas para autocarro, bemix, amurel, catarinacarros, carrobrasil, carrosnaserra, carrosnovale, shopcar, sulrevendas, caminhoes-carretas, euquerocarros e captacao.)</p>
+
+<p><strong>Detalhe que explica muita coisa:</strong> a origem <code>54 meta-instagram</code> está mapeada a um e-mail. Ou seja, esses leads entram <em>por e-mail</em>, não pelo webhook da Meta — e por isso nunca têm <code>meta_sender_id</code> e nunca abrem chat. Ver <a href="/crm/meta">Meta</a>.</p>
+
+<h2>O parser (<code>CrmTable::leadInicial</code>)</h2>
+
+<p>Antes de qualquer coisa, o HTML é reduzido usando duas colunas de <code>sis_crm_origem</code>:</p>
+
+<ul>
+<li><code>crm_origem_tags</code> — <em>allowlist</em> de tags HTML a preservar no <code>strip_tags</code>; o resto vira espaço. Vazio ⇒ default <code>&lt;a&gt;</code>.</li>
+<li><code>crm_origem_ponteiro</code> — âncora de texto: <code>strstr()</code> corta tudo antes dela. Serve para pular cabeçalho/assinatura do portal.</li>
+</ul>
+
+<p>Depois vem uma cadeia de <code>elseif</code> com <strong>parser dedicado por origem</strong> — não existe um formato comum:</p>
+
+<table>
+<thead><tr><th>Origem</th><th>Condição adicional</th><th>Parser</th></tr></thead>
+<tbody>
+<tr><td>19 Webmotors</td><td>—</td><td><code>parseWebmotorsContato()</code></td></tr>
+<tr><td>7 UsadosBR / Motos</td><td>—</td><td><code>parseUsadosBrContato()</code> (+ fallback por <code>crm_origem_remetente_termos</code>)</td></tr>
+<tr><td>4 iCarros</td><td>assunto contém <code>"temos uma possível proposta pra você "</code></td><td><code>parseIcarrosContato()</code></td></tr>
+<tr><td>4 iCarros</td><td>assunto contém <code>"Proposta Recebida: "</code></td><td><code>genericParse()</code></td></tr>
+<tr><td>20 Site</td><td>assunto <code>"Contato - Site"</code> + sender <code>Autoconf</code></td><td><code>parseAutoConfContato()</code></td></tr>
+<tr><td>20 Site</td><td>sender <code>a3motos.com.br</code></td><td><code>parseHostingerContato()</code></td></tr>
+<tr><td>20 Site</td><td>sender <code>noreply@motorsync.com.br</code></td><td><code>parseMotorSyncEmail()</code></td></tr>
+<tr><td>20 Site</td><td>from <code>pallottiveiculos@hotmail.com</code> / <code>atendimento@autoshoppingdacidade.com.br</code></td><td><code>parseRevendaMaisGambiarrationEmailation()</code></td></tr>
+<tr><td>56 Tem Usados</td><td>—</td><td><code>genericParse()</code></td></tr>
+<tr><td>8 Comprecar</td><td>—</td><td>regex inline (<code>Nome do interessado:</code>)</td></tr>
+</tbody>
+</table>
+
+<p>O próprio código reconhece a natureza disso — os comentários dizem <em>"power of gambiarration -&gt; tratamento tosco"</em>, e um dos métodos se chama literalmente <code>parseRevendaMaisGambiarrationEmailation</code>. Origem sem <code>elseif</code> dedicado cai na extração genérica por <code>crm_origem_remetente_termos</code>, que costuma pegar e-mail mas <strong>perder o telefone</strong>.</p>
+
+<h3>Armadilha de tipo: <code>===</code> com int e string misturados</h3>
+
+<p>Os <code>elseif</code> não são consistentes no tipo comparado:</p>
+
+<pre><code>if ($origem === 19 || $origem === "19") {   // defensivo — aceita os dois
+} elseif ($origem === "7") {                 // só string
+} elseif ($origem === "4" && ...) {          // só string
+} elseif ($origem === 20 && ...) {           // só INT
+} elseif ($origem === '56') {                // só string
+} elseif ($origem === '8') {                 // só string</code></pre>
+
+<p>Isso não é estilo, é comportamento: os dois caminhos que chamam <code>leadInicial()</code> passam o <code>$origem</code> em <strong>tipos diferentes</strong> — o do site próprio passa o literal <code>20</code> (int), e o do remetente passa <code>$origem['crm_origem_id']</code> vindo do banco. O <code>|| $origem === "19"</code> existe justamente porque alguém tropeçou nisso.</p>
+
+<p><strong>Consequência prática:</strong> os branches <code>=== 20</code> só disparam pelo caminho do site próprio. Se um dia alguém cadastrar uma linha de origem 20 em <code>sis_crm_origem_remetente</code>, o valor chega como string e <strong>todos os parsers de site (AutoConf, Hostinger, MotorSync, RevendaMais) param de rodar em silêncio</strong> — o lead é criado, só que sem telefone e sem título. Hoje não há nenhuma linha com origem 20 nessa tabela, então o problema está latente, não ativo.</p>
+
+<h2><code>leadTransacional()</code> — o fallback</h2>
+
+<p>Remetente que não bate com nenhuma origem ativa não é descartado: vai para <code>leadTransacional()</code>. É o balde onde cai e-mail de portal novo ainda não cadastrado, resposta de cliente e mensagem automática de sistema. <strong>Ao investigar "portal X não vira lead", o primeiro lugar a olhar é se o remetente dele está em <code>sis_crm_origem_remetente</code>.</strong></p>
+
+<h2>Como debugar um lead que não entrou</h2>
+
+<p>Todo webhook — inclusive os que falham — grava o payload cru <em>antes</em> de qualquer processamento:</p>
+
+<pre><code>$dataWebhook = [
+    "filial_crm_id" =&gt; $dataFilial['filial_crm_id'],
+    "filial_crm_webhook_body" =&gt; json_encode($bodyWebhook),
+    "url" =&gt; $_SERVER['REQUEST_URI']
+];
+$this->getModel("crmwebhook-table")->save($dataWebhook);</code></pre>
+
+<p>Roteiro:</p>
+
+<ol>
+<li><strong>Chegou?</strong> Procure em <code>sis_crm_webhook</code> pelo <code>filial_crm_id</code> e janela de horário. Não achou ⇒ o problema é no Zoho (webhook desligado, <code>:id</code> errado), não na Boom.</li>
+<li><strong>Chegou com corpo?</strong> Se <code>html</code> vier vazio no JSON, é a "Lista de dados limitada" marcada.</li>
+<li><strong>Roteou certo?</strong> Confira o <code>fromAddress</code> do payload contra <code>sis_crm_origem_remetente</code> (e se a origem está com <code>crm_origem_status = 1</code>).</li>
+<li><strong>Parseou?</strong> Se o lead nasceu sem telefone, o layout do e-mail do portal provavelmente mudou — o parser daquela origem precisa de ajuste.</li>
+</ol>
+
+<p>Os logs de exceção do <code>zohoAction</code> saem com módulo <code>webhook_zoho</code>; os de log estruturado, com pasta <code>webhook</code> / arquivo <code>zohoAction</code>. Em produção eles estão no <strong>Papa Entulho</strong> (<code>logs_legacy_exceptions</code> / <code>logs_legacy_exceptions_custom</code>), não no New Relic — ver <a href="/infraestrutura/new-relic">New Relic</a>.</p>
+
+<h2>O caminho que substitui isso</h2>
+
+<p>Já existe uma rota moderna que evita o parser inteiro: <code>ApiController::leadAction()</code>, um POST estruturado direto do site do cliente, autenticado com o mesmo <em>site-token</em> (Bearer, <code>kid</code> por site) que o site já usa para estoque. O docblock é explícito:</p>
+
+<blockquote><p>"Cria um lead a partir de um POST estruturado do SITE do cliente — substitui o caminho e-mail → Zoho → zohoAction → leadInicial (parser). […] Payload estruturado (telefone incluso) elimina o bug do fone perdido."</p></blockquote>
+
+<p>Aceita <code>dry_run</code> para o Centralizador testar elegibilidade sem criar nada, exige <code>nome</code> + (<code>email</code> ou <code>telefone</code>), e usa <code>cod_filial</code> só se pertencer ao master (senão cai na primeira filial com CRM, para não perder o lead). <strong>Para site próprio, prefira essa rota ao fluxo de e-mail.</strong></p>
+
+<h2>Envio de resposta (Zoho Mail API)</h2>
+
+<p><code>ZohoTable::sendMessage()</code> responde o lead pela mesma caixa, com <code>action: reply</code> quando há <code>messageId</code>. O access token é renovado por <code>refreshToken()</code>, que persiste o novo token e o <code>expires</code> via <code>FilialCrmTable::updateZohoToken()</code>. Esse fluxo tem log próprio (pasta <code>zoho-refresh-token</code>, com <code>lastOnly = false</code> e expiração de 7 dias) — é o primeiro lugar a olhar quando uma filial para de conseguir responder e-mail.</p>

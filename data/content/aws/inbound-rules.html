@@ -1,0 +1,196 @@
+<!--
+title: Inbound Rules
+description: Mapa dos security groups: qual launch-wizard e de qual servico, o par ec2-rds-4 e os riscos abertos.
+published: 1
+date: 2026-08-27T02:47:56.893Z
+tags: aws, infraestrutura, rede, security-group
+editor: ckeditor
+dateCreated: 2025-10-23T13:01:03.958Z
+-->
+
+<h1>Inbound Rules — Security Groups</h1>
+
+<p>Atalhos do console (os mesmos de antes):</p>
+
+<ul>
+<li><strong>STAGING</strong> (us-west-1): <a href="https://us-west-1.console.aws.amazon.com/ec2/home?region=us-west-1#SecurityGroup:groupId=sg-07d240a7b058cbd5e"><code>sg-07d240a7b058cbd5e</code></a> — <code>security-group-http-https</code></li>
+<li><strong>PRODUÇÃO / banco</strong> (sa-east-1): <a href="https://sa-east-1.console.aws.amazon.com/ec2/home?region=sa-east-1#ModifyInboundSecurityGroupRules:securityGroupId=sg-044518faf56a13082"><code>sg-044518faf56a13082</code></a> — grupo <code>rds</code></li>
+<li><strong>KONG PRODUÇÃO</strong> (sa-east-1): <a href="https://sa-east-1.console.aws.amazon.com/ec2/home?region=sa-east-1#SecurityGroup:groupId=sg-06df24f52b98523c5"><code>sg-06df24f52b98523c5</code></a> — grupo <code>launch-wizard-2</code></li>
+</ul>
+
+<p>Abaixo, o mapa completo levantado via API (read-only), porque o nome do grupo no console não diz a que serviço ele pertence.</p>
+
+<h2>O problema de nomenclatura</h2>
+
+<p><strong>Oito dos dez security groups de EC2 se chamam <code>launch-wizard-N</code></strong> — nome automático do assistente de criação de instância. O número não tem relação com nada; é ordem de criação. Sem esta tabela, descobrir "qual SG é o do cron" exige abrir instância por instância.</p>
+
+<table>
+<thead><tr><th>Instância EC2</th><th>Security Groups</th><th>Estado</th></tr></thead>
+<tbody>
+<tr><td><code>boomsistemas-legado-main</code></td><td><code>launch-wizard-1</code>, <code>ec2-rds-4</code></td><td>running</td></tr>
+<tr><td><code>boomsistemas-legado-slave</code></td><td><code>launch-wizard-1</code>, <code>ec2-rds-4</code></td><td>ligada 08–20h (Lambda)</td></tr>
+<tr><td><code>kong</code></td><td><code>kong-and-to-loadbalance</code>, <code>launch-wizard-2</code></td><td>running</td></tr>
+<tr><td><code>api-main</code></td><td><code>launch-wizard-3</code>, <code>ec2-rds-4</code></td><td>running</td></tr>
+<tr><td><code>papa-entulho</code></td><td><code>launch-wizard-4</code></td><td>running</td></tr>
+<tr><td><code>cron</code></td><td><code>launch-wizard-5</code>, <code>ec2-rds-4</code></td><td>running</td></tr>
+<tr><td><code>boomia</code></td><td><code>launch-wizard-6</code>, <code>ec2-rds-4</code></td><td>running</td></tr>
+<tr><td><code>socket</code></td><td><code>launch-wizard-7</code></td><td>running</td></tr>
+<tr><td><code>centralizador</code></td><td><code>launch-wizard-8</code></td><td>running</td></tr>
+<tr><td><code>redis-legado</code></td><td><code>redis-legado</code></td><td>running</td></tr>
+</tbody>
+</table>
+
+<h2>Regras de entrada (sa-east-1, vpc-0fc84ab2372e975e1)</h2>
+
+<table>
+<thead><tr><th>Grupo</th><th>Serviço</th><th>Porta</th><th>Origem</th></tr></thead>
+<tbody>
+<tr><td rowspan="3"><code>launch-wizard-1</code><br/><code>sg-0e0e0589d6db182bf</code></td><td rowspan="3">legado main+slave</td><td>80</td><td>0.0.0.0/0</td></tr>
+<tr><td>443</td><td>0.0.0.0/0</td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="2"><code>launch-wizard-2</code><br/><code>sg-06df24f52b98523c5</code></td><td rowspan="2">Kong (GUI)</td><td>8401-8402</td><td>4 IPs /32 (escritório, Bruno, Kendji)</td></tr>
+<tr><td>3000</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="2"><code>launch-wizard-3</code><br/><code>sg-05ed8ad0cd368f3c9</code></td><td rowspan="2">api-main</td><td>3333</td><td>56.126.19.37/32</td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="2"><code>launch-wizard-4</code><br/><code>sg-09c9e24910782a0c9</code></td><td rowspan="2">papa-entulho</td><td>3308 (mariadb)</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="2"><code>launch-wizard-5</code><br/><code>sg-0c13ba013fb3b7eb0</code></td><td rowspan="2">cron</td><td>8085</td><td>2 IPs /32 (Bruno casa, Boom)</td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="3"><code>launch-wizard-6</code><br/><code>sg-088a8d38558ecaab0</code></td><td rowspan="3">boomia</td><td>6380 (redis)</td><td><code>sg-0e0e0589d6db182bf</code> (legado)</td></tr>
+<tr><td>443</td><td>56.126.19.37/32</td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="3"><code>launch-wizard-7</code><br/><code>sg-0f7153efb095a9b0c</code></td><td rowspan="3">socket</td><td>3111 (socket.io)</td><td>0.0.0.0/0 <em>(esperado)</em></td></tr>
+<tr><td>443</td><td>0.0.0.0/0</td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="3"><code>launch-wizard-8</code><br/><code>sg-01dcc322c90d0972f</code></td><td rowspan="3">centralizador</td><td>80</td><td>0.0.0.0/0</td></tr>
+<tr><td>443</td><td>0.0.0.0/0</td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="3"><code>redis-legado</code><br/><code>sg-0394d7e81ff0f92e8</code></td><td rowspan="3">redis do legado</td><td>6377</td><td><code>ec2-rds-4</code></td></tr>
+<tr><td>6378</td><td><code>ec2-rds-4</code></td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td rowspan="2"><code>kong-and-to-loadbalance</code><br/><code>sg-04958158c7c361c2d</code></td><td rowspan="2">Kong ← ELB</td><td>8400</td><td><code>loadbalance-kong</code></td></tr>
+<tr><td>22</td><td><strong>0.0.0.0/0</strong></td></tr>
+<tr><td><code>loadbalance</code><br/><code>sg-096b932d6edb8acd3</code></td><td>ELB legado</td><td>80, 443</td><td>0.0.0.0/0 <em>(esperado)</em></td></tr>
+<tr><td><code>loadbalance-kong</code><br/><code>sg-09b41a885de839a67</code></td><td>ELB Kong</td><td>443</td><td>0.0.0.0/0 <em>(esperado)</em></td></tr>
+<tr><td><code>rds</code><br/><code>sg-044518faf56a13082</code></td><td>acesso humano ao banco</td><td>3306</td><td>7 IPs /32 (ver abaixo)</td></tr>
+<tr><td><code>rds-ec2-4</code><br/><code>sg-0a6f0b9803553870e</code></td><td>RDS ← EC2</td><td>3306</td><td><code>ec2-rds-4</code></td></tr>
+<tr><td><code>ec2-rds-4</code><br/><code>sg-0e025eac7d40f799b</code></td><td><em>marcador</em> (sem inbound)</td><td>—</td><td>—</td></tr>
+</tbody>
+</table>
+
+<h2>O par <code>ec2-rds-4</code> / <code>rds-ec2-4</code></h2>
+
+<p>Esses dois foram criados pelo assistente "Connect to RDS" e implementam o padrão correto de <em>security group como identidade</em>:</p>
+
+<ul>
+<li><code>ec2-rds-4</code> <strong>não tem nenhuma regra de entrada</strong>. Ele existe só para ser anexado às EC2 que podem falar com o banco — é um crachá.</li>
+<li><code>rds-ec2-4</code> libera 3306 <strong>com origem <code>ec2-rds-4</code></strong>, não com CIDR.</li>
+</ul>
+
+<p>Consequência prática: <strong>para dar acesso ao banco a uma EC2 nova, anexe <code>ec2-rds-4</code> a ela — não adicione IP em lugar nenhum.</strong> Instância que troca de IP continua funcionando. As descrições da AWS nesses grupos avisam: <em>"Modification could lead to connection loss"</em>.</p>
+
+<p>Hoje carregam o crachá: <code>legado-main</code>, <code>legado-slave</code>, <code>api-main</code>, <code>cron</code>, <code>boomia</code>. <strong><code>socket</code>, <code>centralizador</code>, <code>papa-entulho</code> e <code>kong</code> não têm acesso ao RDS principal</strong> — o que é intencional e vale saber antes de tentar apontar um serviço novo para o banco.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph LR
+  E1["legado-main"] --> C["ec2-rds-4<br/>(sem inbound, so cracha)"]
+  E2["api-main"] --> C
+  E3["cron"] --> C
+  E4["boomia"] --> C
+  C -->|origem permitida| R["rds-ec2-4<br/>3306"]
+  R --> DB["RDS boomsistemas<br/>+ 3 replicas"]
+  H["IPs /32 do time"] -->|grupo 'rds'| DB
+</code></pre>
+</div>
+
+<h2>Grupo <code>rds</code> — acesso humano ao banco</h2>
+
+<p>Porta 3306 liberada para 7 endereços /32, todos com descrição:</p>
+
+<table>
+<thead><tr><th>Descrição</th><th>CIDR</th></tr></thead>
+<tbody>
+<tr><td><code>BOOM_SISTEMAS</code></td><td>189.4.104.145/32</td></tr>
+<tr><td><code>5_ANDAR_VIVO</code></td><td>162.120.186.148/32</td></tr>
+<tr><td><code>5_ANDAR_ATENDIMENTO</code></td><td>138.122.67.42/32</td></tr>
+<tr><td><code>KENDJI_CASA</code></td><td>189.4.123.12/32</td></tr>
+<tr><td><code>KENDJI_CASA_2</code></td><td>189.4.122.30/32</td></tr>
+<tr><td><code>Bruno_Casa</code></td><td>45.166.204.43/32</td></tr>
+<tr><td><code>CESAR_CASA</code></td><td>187.56.78.67/32</td></tr>
+</tbody>
+</table>
+
+<p><strong>É aqui que se libera IP novo para conectar no banco de produção pelo DBGate/cliente MySQL.</strong> Sempre com <code>/32</code> e <strong>sempre com descrição</strong> — sem ela, ninguém consegue saber depois de quem é a regra nem quando pode remover. Ver também <a href="/aws/ips">IP White List</a>.</p>
+
+<p>As 4 instâncias RDS (<code>boomsistemas</code> <code>db.t4g.xlarge</code> + réplicas <code>replica-1</code>, <code>replica-2</code>, <code>replica-for-dev</code>, todas <code>db.t4g.small</code>) usam esse grupo <strong>e</strong> o <code>rds-ec2-4</code>. Todas estão com <code>PubliclyAccessible: true</code> — ou seja, <strong>o único controle de acesso ao banco é essa lista de 7 IPs</strong>. Remover uma regra daqui por engano derruba o acesso do time; adicionar um CIDR largo expõe o banco à internet.</p>
+
+<h2>Riscos abertos</h2>
+
+<h3>1. SSH aberto para o mundo em 9 grupos</h3>
+
+<p><code>tcp/22 :: 0.0.0.0/0</code> está em <code>launch-wizard-1</code> a <code>-8</code>, em <code>redis-legado</code> e em <code>kong-and-to-loadbalance</code> — praticamente toda a frota. O acesso depende exclusivamente da chave privada (<code>~/keys/new-prod-sp.pem</code> e afins). Restringir para os IPs do escritório/VPN é a mudança de maior impacto e menor esforço nessa conta.</p>
+
+<h3>2. Banco do Papa Entulho exposto</h3>
+
+<p><code>launch-wizard-4</code> libera <strong>tcp/3308 (MariaDB) para 0.0.0.0/0</strong>. É o banco de logs — o mesmo que o legado acessa em <code>boom-papa-entulho.duckdns.org:3308</code> (ver <code>Services/PapaEntulhoDb.php</code>). Está aberto porque o acesso é feito pela internet pública via DuckDNS, e não por rede interna. Como esse banco guarda mensagens de exceção, stack traces e identificação de usuário (<code>logs_legacy_exceptions</code>), a exposição não é trivial. Substituir o DNS público por SG-a-SG resolveria os dois problemas de uma vez.</p>
+
+<h3>3. Porta 3000 do Kong aberta</h3>
+
+<p><code>launch-wizard-2</code> tem <code>tcp/3000 :: 0.0.0.0/0</code>, enquanto as portas 8401-8402 (GUI) estão corretamente restritas a 4 IPs. Vale confirmar o que responde na 3000 nessa instância e, se não precisar ser público, fechar.</p>
+
+<h2>Staging (us-west-1) — <code>security-group-http-https</code></h2>
+
+<p>Um único grupo concentra tudo. Restrito por IP:</p>
+
+<table>
+<thead><tr><th>Porta</th><th>Origem</th></tr></thead>
+<tbody>
+<tr><td>443 (HTTPS)</td><td>189.4.104.145/32</td></tr>
+<tr><td>3306 (MySQL)</td><td>7 IPs /32 (staging EC2 + PCs do time)</td></tr>
+<tr><td>8401-8402, 9443 (Kong GUI)</td><td>IPs do escritório/casa</td></tr>
+<tr><td>1025 (Mailhog SMTP)</td><td>54.176.4.83/32 (a própria EC2)</td></tr>
+</tbody>
+</table>
+
+<p>Aberto para <code>0.0.0.0/0</code>:</p>
+
+<table>
+<thead><tr><th>Porta</th><th>Serviço</th></tr></thead>
+<tbody>
+<tr><td>22</td><td>SSH</td></tr>
+<tr><td>80</td><td>HTTP</td></tr>
+<tr><td>3333</td><td>API</td></tr>
+<tr><td>7000 / 7001</td><td>NGINX / PHP7-fpm</td></tr>
+<tr><td>8000</td><td>BoomSistemasCI4</td></tr>
+<tr><td>8001</td><td>ApiBoomSistemas</td></tr>
+<tr><td>8443</td><td>Heimdall</td></tr>
+<tr><td>7778</td><td>Wiki.js</td></tr>
+<tr><td>7779</td><td>MicroBin</td></tr>
+<tr><td>9003 / 9004</td><td>SMTP / Mailhog</td></tr>
+<tr><td><strong>9999</strong></td><td><strong>Passbolt</strong></td></tr>
+</tbody>
+</table>
+
+<p><strong>Atenção ao Passbolt na 9999 aberto para a internet</strong> — é o cofre de senhas do time, e staging costuma receber menos atenção de patch que produção. Junto com Wiki.js e MicroBin, são três aplicações com dado interno expostas publicamente numa máquina de staging.</p>
+
+<h2>Como consultar sem abrir o console</h2>
+
+<pre><code>export AWS_PROFILE=claude-ro
+
+# quem usa qual grupo
+aws ec2 describe-instances --region sa-east-1 \
+  --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,State.Name,join(`,`,SecurityGroups[].GroupName)]' \
+  --output text
+
+# regras de um grupo
+aws ec2 describe-security-groups --region sa-east-1 \
+  --group-ids sg-044518faf56a13082 --output json
+
+# achar todo mundo com SSH aberto
+aws ec2 describe-security-groups --region sa-east-1 \
+  --filters Name=ip-permission.from-port,Values=22 \
+            Name=ip-permission.cidr,Values=0.0.0.0/0 \
+  --query 'SecurityGroups[].GroupName' --output text</code></pre>
+
+<p>O profile <code>claude-ro</code> é somente leitura — alteração de regra continua sendo feita no console ou por quem tem credencial de escrita.</p>

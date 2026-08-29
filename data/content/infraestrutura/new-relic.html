@@ -1,0 +1,266 @@
+<!--
+title: New Relic
+description: Agente de infra vs agente PHP, nomeacao de transacoes, DRIVER_LOG_MODE, logs expirados e retencao de 8 dias.
+published: 1
+date: 2026-08-27T02:47:59.580Z
+tags: apm, infraestrutura, monitoramento, new-relic, observabilidade
+editor: ckeditor
+dateCreated: 2026-01-15T21:53:59.112Z
+-->
+
+<h1>New Relic</h1>
+
+<p>Existem <strong>dois agentes New Relic diferentes</strong> rodando em produção, e eles não têm nada a ver um com o outro além do nome. Confundir os dois é a causa de quase toda dúvida sobre "o New Relic não está pegando o servidor X".</p>
+
+<ul>
+<li><strong>Agente de Infraestrutura</strong> (<code>newrelic-infra</code>) — roda no <strong>host</strong>, via <code>systemd</code>. Coleta CPU, memória, disco, rede e métricas dos containers Docker. Não sabe nada de PHP.</li>
+<li><strong>Agente APM PHP</strong> — roda <strong>dentro do container <code>php7</code></strong>, é uma extensão do PHP. Coleta transações, erros, queries e traces. É ele que define as entidades <code>BoomSistemas-Master</code> e <code>BoomSistemas-Slave-1</code> no APM.</li>
+</ul>
+
+<p>Cada um é ativado num lugar diferente: o de infra pelo <code>systemctl</code> no host, o de PHP pelo <code>docker-compose.yml</code> do serviço <code>php7</code>. Ligar um <strong>não</strong> liga o outro.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  subgraph EC2["EC2 boomsistemas-legado-main / -slave"]
+    SD["systemd: newrelic-infra<br/>v1.71.3"]
+    subgraph DK["Docker"]
+      NG["container nginx"]
+      PHP["container php7<br/>extensao newrelic v12.3.0.28"]
+    end
+  end
+
+  SD -->|SystemSample<br/>ContainerSample| NR["New Relic<br/>conta 7544045"]
+  PHP -->|Transaction<br/>TransactionError| NR
+
+  NR --> INFRA["Infrastructure<br/>host ip-172-31-*"]
+  NR --> APM["APM<br/>BoomSistemas-Master<br/>BoomSistemas-Slave-1"]
+</code></pre>
+</div>
+
+<h2>Estado atual (medido em 26/08/2026)</h2>
+
+<p>A informação antiga de que "somente o master está ativo" <strong>está desatualizada</strong>. Hoje os dois hosts reportam, nos dois agentes:</p>
+
+<table>
+<thead>
+<tr><th>Instância EC2</th><th>IP privado / host no NR</th><th>App APM</th><th>Infra</th><th>Throughput</th></tr>
+</thead>
+<tbody>
+<tr><td><code>boomsistemas-legado-main</code><br/><code>i-078200ce5f5c322bb</code></td><td>172.31.11.184<br/><code>ip-172-31-11-184</code></td><td><code>BoomSistemas-Master</code></td><td>OK</td><td>~469 rpm</td></tr>
+<tr><td><code>boomsistemas-legado-slave</code><br/><code>i-01dfbf8a2e058ae2d</code></td><td>172.31.9.175<br/><code>ip-172-31-9-175</code></td><td><code>BoomSistemas-Slave-1</code></td><td>OK</td><td>~391 rpm</td></tr>
+</tbody>
+</table>
+
+<p>Ambos são <code>t3.medium</code> (1 vCPU, ~4 GB) em <code>sa-east-1a</code>, rodando os containers <code>nginx</code> + <code>php7</code>. Agente de infra <code>1.71.3</code> e agente PHP <code>12.3.0.28</code> nos dois — mesma versão, então divergência de comportamento entre master e slave não é versão de agente.</p>
+
+<p>Para confirmar o estado a qualquer momento, sem SSH:</p>
+
+<pre><code>SELECT count(*) FROM Transaction FACET appName, host SINCE 1 day ago
+SELECT latest(agentVersion) FROM SystemSample FACET hostname SINCE 1 day ago</code></pre>
+
+<h2>Ativando os agentes</h2>
+
+<h3>Agente de infraestrutura (host)</h3>
+<pre><code>sudo systemctl enable newrelic-infra
+sudo systemctl status newrelic-infra</code></pre>
+<p>Config em <code>/etc/newrelic-infra.yml</code> (contém a <code>license_key</code>). O <code>enable</code> é o que garante que ele volte depois de um reboot — importante no slave, que é desligado e religado todo dia (ver abaixo).</p>
+
+<h3>Agente APM PHP (container)</h3>
+<p>Configurado no <code>docker-compose.yml</code> do serviço <code>php7</code>. O parâmetro que importa é o <strong>appname</strong>: é ele que decide em qual entidade do APM os dados caem. Se os dois hosts subirem com o mesmo appname, os dados dos dois se misturam numa entidade só e fica impossível separar master de slave num incidente.</p>
+
+<h2>Como as transações são nomeadas — e o problema de cardinalidade</h2>
+
+<p>Em <code>app.boomsistemas.com.br/public/index.php:41</code>, antes de o Zend bootar:</p>
+
+<pre><code>if (extension_loaded('newrelic')) {
+    // Usa a URI da requisição para dar nome à transação no painel
+    newrelic_name_transaction($_SERVER['REQUEST_URI']);
+}
+Zend\Mvc\Application::init(require 'config/application.config.php')-&gt;run();</code></pre>
+
+<p>Por isso todas as transações aparecem como <code>WebTransaction/Custom/&lt;uri&gt;</code>. O <code>guard</code> <code>extension_loaded('newrelic')</code> é o que faz o mesmo código rodar em dev sem a extensão instalada.</p>
+
+<p><strong>O efeito colateral:</strong> <code>REQUEST_URI</code> inclui <em>path params e query string</em>. Isso gera um nome de transação novo para cada variação de URL. Medido em 24h:</p>
+
+<ul>
+<li><strong>21.868</strong> nomes únicos de transação no <code>BoomSistemas-Master</code> (20.833 no slave)</li>
+<li><strong>129.204</strong> transações/dia com <code>?</code> no nome — ex.: <code>crm/getleads?view=quadro</code>, <code>login?q=%252Fcrm%252Fnotificacoes</code>, <code>api/fullestoque?veiculo_id=0</code>, <code>api/home/filial/577?</code></li>
+</ul>
+
+<p>O New Relic recomenda ficar na casa do milhar de nomes únicos; acima disso ele aplica <em>metric grouping issue</em> e passa a colapsar segmentos em <code>*</code> por conta própria. É exatamente o que já acontece com o webhook do PlugMessage, que aparece agrupado como:</p>
+
+<pre><code>WebTransaction/Custom/webhook/plugmessage/*/status
+WebTransaction/Custom/webhook/plugmessage/*/receber</code></pre>
+
+<p>Ou seja: o agrupamento está sendo feito pelo <strong>New Relic</strong>, não pela aplicação — e onde ele não colapsa, a lista de transações vira ruído. Para consertar de verdade, a URI deveria ser normalizada antes de virar nome: cortar a query string e substituir IDs numéricos por placeholder.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph LR
+  A["/crm/lead/1061781?tab=2"] --> B{"newrelic_name_transaction"}
+  B -->|hoje: URI crua| C["WebTransaction/Custom/<br/>crm/lead/1061781?tab=2<br/>(1 nome novo por lead)"]
+  B -->|normalizada| D["WebTransaction/Custom/<br/>crm/lead/{id}<br/>(1 nome para todos)"]
+</code></pre>
+</div>
+
+<p><strong>Exceção:</strong> <code>WebTransaction/Uri/aws-check-elb.php</code> (~34 mil/dia) aparece com prefixo <code>Uri/</code> e não <code>Custom/</code> — é o health check do ELB, que não passa pelo <code>public/index.php</code> e portanto nunca é renomeado. Serve como marcador confiável de tráfego de health check ao filtrar dashboards.</p>
+
+<h2>DRIVER_LOG_MODE — o switch que decide se o New Relic recebe log</h2>
+
+<p>Todo tratamento de erro e log do sistema legado passa por <code>config/deep_debug.php</code>, que tem <strong>três drivers</strong> selecionados por uma variável de ambiente:</p>
+
+<pre><code>// DRIVER_MODE: 0 = arquivo, 1 = New Relic, 2 = PapaEntulhoDb
+function _getDriverMode(): int
+{
+    return (int) getenv('DRIVER_LOG_MODE');
+}</code></pre>
+
+<p>São três funções expostas globalmente, usadas em massa no código do módulo:</p>
+
+<table>
+<thead>
+<tr><th>Função</th><th>Call sites</th><th>Modo 1 (New Relic)</th><th>Modo 2 (Papa Entulho)</th><th>Modo 0 (arquivo)</th></tr>
+</thead>
+<tbody>
+<tr><td><code>globalExceptionHandler</code></td><td><code>set_exception_handler</code></td><td><code>newrelic_notice_error()</code></td><td>tabela <code>app_exceptions</code></td><td><code>error_log()</code></td></tr>
+<tr><td><code>handleException()</code></td><td>483</td><td><code>newrelic_notice_error()</code> + custom params</td><td>tabela <code>logs_legacy_exceptions</code></td><td><code>data/logs/&lt;module&gt;/</code></td></tr>
+<tr><td><code>handleLog()</code></td><td>361</td><td>evento <code>AppLogs</code></td><td>tabela <code>logs_legacy_exceptions_custom</code></td><td><code>data/logs/&lt;folder&gt;/</code></td></tr>
+</tbody>
+</table>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  E["handleException / handleLog"] --> M{"DRIVER_LOG_MODE"}
+  M -->|1| NRC{"extension_loaded<br/>('newrelic')?"}
+  NRC -->|sim| NR["New Relic<br/>notice_error / AppLogs"]
+  NRC -->|nao| FILE["cai no modo arquivo"]
+  M -->|2| PE["PapaEntulhoDb<br/>MariaDB boom-papa-entulho"]
+  M -->|0| FILE
+  PE -.->|conexao falha| FILE
+</code></pre>
+</div>
+
+<p><strong>Detalhe importante do modo 1:</strong> quando é o New Relic quem recebe, <code>handleException()</code> enriquece o erro com contexto de sessão — dados que <em>não existem</em> nos outros dois drivers:</p>
+
+<pre><code>newrelic_notice_error($e-&gt;getMessage(), $e);
+newrelic_add_custom_parameter('module', $module);
+if ($complement) newrelic_add_custom_parameter('complement', $complement);
+if (isset($session-&gt;usuario-&gt;user_id)) {
+    newrelic_add_custom_parameter('user_id', $session-&gt;usuario-&gt;user_id);
+    newrelic_add_custom_parameter('user_full_name', ...);
+}</code></pre>
+
+<p>E <code>handleLog()</code> fatia a mensagem porque o New Relic corta atributo em ~4096 bytes — cada log vira N eventos <code>AppLogs</code> costurados por um <code>log_id</code> compartilhado (<code>part</code> / <code>total</code>), em pedaços de 250 caracteres.</p>
+
+<h3>Qual modo está em produção hoje</h3>
+
+<p><strong>Modo 2 (Papa Entulho), não New Relic.</strong> Evidência direta:</p>
+
+<pre><code>SELECT count(*) FROM AppLogs SINCE 30 days ago
+-- 0</code></pre>
+
+<p>Nenhum evento <code>AppLogs</code> nos últimos 30 dias. Ou seja: <strong>todo o caminho de log estruturado para o New Relic é código morto em produção hoje</strong> — os 361 <code>handleLog()</code> gravam no MariaDB do Papa Entulho (<code>logs_legacy_exceptions_custom</code>), não no APM. Isso bate com o <code>.env.example</code>, que documenta <code>DRIVER_LOG_MODE=2 # use 2 somente para production</code>.</p>
+
+<p><strong>Consequência prática:</strong> ao caçar um erro, os erros que <em>aparecem</em> no APM (aba Errors) chegam lá pela instrumentação automática do agente PHP, não pelo <code>handleException()</code>. Erro tratado dentro de um <code>try/catch</code> que chama <code>handleException()</code> está no Papa Entulho e <strong>não</strong> no New Relic. Procure nos dois.</p>
+
+<p>Vale notar o fallback: se o <code>PapaEntulhoDb</code> não conseguir conectar (timeout de 2s), ele chama <code>handleLog(..., forceFile: true)</code> e o log vai para arquivo no container — nunca para o New Relic. Perda silenciosa de log se ninguém olhar o disco.</p>
+
+<h2>Logs que expiraram e ninguém percebeu</h2>
+
+<p>O 6º parâmetro de <code>handleLog()</code> é <code>$expires</code>, e a implementação <strong>descarta o log</strong> quando a data já passou:</p>
+
+<pre><code>if ($expires !== null) {
+    $now = new DateTime();
+    // ... converte timestamp | string | DateTime
+    if ($expiryDate &amp;&amp; $now &gt; $expiryDate) {
+        return;   // sai sem gravar em lugar nenhum
+    }
+}</code></pre>
+
+<p>A ideia é boa: log de investigação temporária se apaga sozinho, sem virar lixo permanente. O problema é que a data é <strong>escrita à mão na chamada</strong>, e ninguém volta para revisar.</p>
+
+<p>Varredura no <code>app.boomsistemas.com.br</code>: existem <strong>25 chamadas de <code>handleLog()</code> com data fixa</strong>, e <strong>todas as 25 datas já passaram</strong> (a mais recente é <code>2026-08-23</code>). Ou seja, <strong>nenhuma delas grava nada hoje</strong>.</p>
+
+<table>
+<thead><tr><th>Arquivo</th><th>Log</th><th>Expirou em</th></tr></thead>
+<tbody>
+<tr><td><code>Controller/CrmIntegracaoController.php</code></td><td>auto-subscribe / revoke (5 chamadas)</td><td>2025-12-17</td></tr>
+<tr><td><code>Model/CrmMetaTable.php</code></td><td><code>meta/capture_fb</code></td><td>2025-12-18</td></tr>
+<tr><td><code>Model/CrmTable.php</code></td><td><code>crm_update_carchat</code></td><td>2025-12-19</td></tr>
+<tr><td><code>Model/CrmMetaTable.php</code></td><td><code>meta/name_capture</code> (3 chamadas)</td><td>2026-01-06</td></tr>
+<tr><td><code>Model/CrmMetaTable.php</code></td><td><code>meta/own_create_lead</code></td><td>2026-01-15</td></tr>
+<tr><td><code>Services/GupShupCrm.php</code></td><td><code>gupshup_debug_whyy</code></td><td>2026-01-28</td></tr>
+<tr><td><code>Controller/ApiController.php</code></td><td><code>faileds</code>, <code>reaction</code></td><td>2026-01-30</td></tr>
+<tr><td><code>Services/OneSignalPush.php</code></td><td><code>one-signal/push</code> (falha de envio)</td><td>2026-03-31</td></tr>
+<tr><td><code>Model/CrmOlxTable.php</code></td><td><code>olx/chat_already_exists_zoho</code> (2)</td><td>2026-04-30</td></tr>
+<tr><td><code>Controller/ApiController.php</code></td><td><code>ml-raw-incoming</code>, <code>ml-lead-resource</code></td><td>2026-08-23</td></tr>
+</tbody>
+</table>
+
+<p><strong>Por que isso importa:</strong> ao investigar um problema nessas áreas, a ausência de log <em>não</em> é evidência de que nada aconteceu — é evidência de que o log está desligado. Vários deles são exatamente os que alguém procuraria primeiro: falha de push (OneSignal), merge de lead OLX/Zoho, captura de nome na Meta.</p>
+
+<p>Para reativar temporariamente, empurre a data na chamada (ou passe <code>null</code> no <code>$expires</code>) e faça deploy. Para achar todas:</p>
+
+<pre><code>grep -rnP "handleLog\(.*?['\"]20\d\d-\d\d-\d\d" --include="*.php" module/</code></pre>
+
+<h2>Retenção: o APM só guarda 8 dias</h2>
+
+<p>Medido na conta <code>7544045</code>: consulta em <code>Transaction</code> retorna dados a partir de <strong>18/08/2026</strong> e zero antes disso (janela de 26/08). Confirmado com:</p>
+
+<pre><code>SELECT count(*) FROM Transaction TIMESERIES 1 day SINCE 12 days ago UNTIL 6 days ago</code></pre>
+
+<p>Não adianta abrir o APM procurando um incidente de três semanas atrás — <strong>não existe mais</strong>. Para histórico longo, a fonte é o Papa Entulho (que persiste em tabela) ou os gráficos de métricas agregadas, não os eventos brutos.</p>
+
+<h2>Pegadinha: o slave desliga às 20h (não é incidente)</h2>
+
+<p>O <code>boomsistemas-legado-slave</code> é ligado e desligado por duas Lambdas em <code>sa-east-1</code>:</p>
+
+<ul>
+<li><code>LigarSlaves</code> — sobe a instância ~08h</li>
+<li><code>DesligarSlaves</code> — derruba a instância ~20h</li>
+</ul>
+
+<p>Observado em 26/08/2026: a instância subiu às 08:00 BRT e o último dado no New Relic foi exatamente <strong>20:00 BRT</strong>, com <code>StateTransitionReason: "User initiated (2026-08-26 23:05:19 GMT)"</code>. No fim de semana ela nem sobe — no gráfico de 7 dias, o <code>BoomSistemas-Slave-1</code> tem dois dias inteiros zerados.</p>
+
+<p><strong>Portanto:</strong> buraco no gráfico do slave à noite ou no fim de semana é comportamento esperado, não queda. Já buraco no <code>BoomSistemas-Master</code> é anomalia real — o master roda 24/7 (ligado desde 30/09/2025, sem restart).</p>
+
+<p>Consequência para o agente de infra: como o slave reinicia todo dia, <code>systemctl enable newrelic-infra</code> nele não é opcional. Sem o <code>enable</code>, o agente sobe uma vez na mão e some no próximo ciclo.</p>
+
+<h2>Queries NRQL úteis</h2>
+
+<pre><code>-- Quem está reportando agora (APM + host)
+SELECT count(*) FROM Transaction FACET appName, host SINCE 1 day ago
+
+-- Agente de infra vivo nos dois hosts
+SELECT latest(agentVersion), latest(instanceType) FROM SystemSample
+FACET hostname SINCE 1 day ago
+
+-- Containers vistos pelo agente de infra
+SELECT uniques(name) FROM ContainerSample FACET hostname SINCE 1 day ago
+
+-- Erros por tipo e por app
+SELECT count(*) FROM TransactionError FACET appName, error.class SINCE 7 days ago
+
+-- Erros por endpoint (usa request.uri, que não sofre o rename)
+SELECT count(*) FROM TransactionError FACET appName, request.uri SINCE 3 days ago
+
+-- Endpoints mais lentos
+SELECT count(*), average(duration) FROM Transaction
+FACET appName, name SINCE 1 day ago LIMIT 20
+
+-- Medir o problema de cardinalidade
+SELECT uniqueCount(name) FROM Transaction FACET appName SINCE 1 day ago
+SELECT count(*) FROM Transaction WHERE name LIKE '%?%' SINCE 1 day ago
+
+-- Confirmar se DRIVER_LOG_MODE=1 está ativo em algum lugar
+SELECT count(*) FROM AppLogs SINCE 30 days ago</code></pre>
+
+<h2>Resumo dos pontos abertos</h2>
+
+<ul>
+<li><strong>Cardinalidade de transação</strong> — 21.868 nomes únicos/dia. Normalizar a URI em <code>public/index.php</code> antes do <code>newrelic_name_transaction()</code> (cortar query string, trocar ID numérico por placeholder).</li>
+<li><strong>Log estruturado desligado</strong> — o caminho <code>AppLogs</code> nunca é exercitado em produção (<code>DRIVER_LOG_MODE=2</code>). Ou se assume que a fonte de log é o Papa Entulho, ou se liga o modo 1; hoje o código dos dois existe e só um roda.</li>
+<li><strong>Sem alerta configurado</strong> — as duas entidades APM estão com <code>alertSeverity: NOT_CONFIGURED</code>. Nada dispara sozinho, o New Relic hoje só serve para consulta manual.</li>
+</ul>

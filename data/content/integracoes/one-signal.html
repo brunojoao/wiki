@@ -1,0 +1,385 @@
+<!--
+title: OneSignal
+description: Push do legado e do Laravel: buildUserId, kill switches, auditoria por API do lado do dispositivo, notification_types e como liberar em cada navegador.
+published: 1
+date: 2026-08-28T17:39:10.965Z
+tags: integracoes, notificação, onesignal, push, suporte, web-push
+editor: ckeditor
+dateCreated: 2025-12-03T18:18:29.312Z
+-->
+
+<h1>OneSignal — Notificações Push</h1>
+
+<h2>Acesso</h2>
+<p>Painel do <strong>OneSignal</strong> com o e-mail <strong>dev@boomsistemas.com.br</strong>; senha no <strong>Passbolt</strong>.</p>
+
+<h2>Onde está o código</h2>
+
+<p><strong>Correção:</strong> o caminho <code>/libraries/OneSignalPush.php</code> não existe mais. O arquivo atual do sistema legado é:</p>
+
+<pre><code>module/Application/src/Application/Services/OneSignalPush.php</code></pre>
+
+<p>E ele não é o único ponto de envio — há uma implementação paralela em Laravel nos outros dois projetos:</p>
+
+<table>
+<thead><tr><th>Projeto</th><th>Arquivo</th></tr></thead>
+<tbody>
+<tr><td><code>app.boomsistemas.com.br</code> (Zend)</td><td><code>Services/OneSignalPush.php</code> — classe estática</td></tr>
+<tr><td><code>boomia</code> (Laravel)</td><td><code>app/Services/OneSignalService.php</code></td></tr>
+<tr><td><code>boom_cron</code> (Laravel)</td><td><code>app/Services/OneSignalService.php</code></td></tr>
+</tbody>
+</table>
+
+<p>O service worker do navegador fica em <code>public/OneSignalSDKWorker.js</code> (com uma cópia na raiz do projeto). O lado cliente — init do SDK e o sininho — está em <code>module/Application/view/layout/layout.phtml:97-121</code> e <code>module/Application/view/partial/menu.phtml:156-244</code>.</p>
+
+<h2>Configuração</h2>
+
+<pre><code>private static $baseUrl = 'https://onesignal.com/api/v1';
+
+ONESIGNAL_APP_ID        -> getenv('ONESIGNAL_APP_ID')
+ONESIGNAL_APP_ID_SAFARI -> getenv('ONESIGNAL_APP_ID_SAFARI')   // safari_web_id
+ONESIGNAL_REST_API_KEY  -> getenv('ONESIGNAL_REST_API_KEY')</code></pre>
+
+<p>Autenticação por header <code>Authorization: Basic {REST_API_KEY}</code> (padrão da REST API v1 do OneSignal — a chave vai crua, não é base64 de user:pass).</p>
+
+<blockquote>
+<p><strong>A REST API key é read + write.</strong> Um único <code>POST /notifications</code> com <code>included_segments: ["All"]</code> dispara push para a base inteira (hoje ~82 mil devices registrados). Para auditoria, use só <code>GET</code>. No PC de dev há um guard-rail de <code>PreToolUse</code> (<code>~/.claude/hooks/prod-write-guard.py</code>) que bloqueia método de escrita para <code>onesignal.com</code> antes de executar.</p>
+</blockquote>
+
+<h3>Pegadinha do domínio</h3>
+
+<p>No painel, o <strong>Site URL</strong> do app (<code>chrome_web_origin</code>) é <code>https://boomsistemas.com.br</code> — <strong>sem</strong> o <code>app.</code>. O diretório do projeto se chama <code>app.boomsistemas.com.br</code>, mas esse host <strong>não existe em DNS</strong>: o sistema é servido em <code>boomsistemas.com.br</code>. Web push só funciona se a origem do SDK for idêntica à cadastrada, então ao mexer em domínio/subdomínio isso tem que andar junto.</p>
+
+<h2>A chave que liga usuário Boom ↔ dispositivo</h2>
+
+<p>Esta é a parte que mais confunde:</p>
+
+<pre><code>public static function buildUserId($uid)
+{
+    return $uid . '_' . sha1("__" . $uid);
+}</code></pre>
+
+<p>O <code>external_user_id</code> registrado no OneSignal <strong>não é o <code>user_id</code> puro</strong> — é <code>&lt;user_id&gt;_&lt;sha1("__" . user_id)&gt;</code>. O prefixo com o id em claro serve para inspeção; o sufixo sha1 funciona como uma assinatura fraca, para que não se consiga notificar um usuário arbitrário só chutando um número sequencial.</p>
+
+<p><strong>Implicação prática:</strong> ao procurar um usuário no painel do OneSignal, busque pelo valor completo. E qualquer código que envie push <strong>tem</strong> que passar por <code>buildUserId()</code> — mandar o <code>user_id</code> cru resulta em notificação que não chega e <strong>nenhum erro</strong> (o OneSignal aceita o request e simplesmente não acha destinatário).</p>
+
+<p>Para montar o id de um usuário na mão:</p>
+
+<pre><code>php -r 'echo $argv[1]."_".sha1("__".$argv[1]);' 12964
+# 12964_12af92aa59e6643c3a1828c8a327b446b0726047</code></pre>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph LR
+  U["user_id = 4821"] --> B["buildUserId()"]
+  B --> E["4821_&lt;sha1('__4821')&gt;"]
+  E --> OS["OneSignal<br/>include_external_user_ids"]
+  OS --> D["dispositivos do usuario"]
+</code></pre>
+</div>
+
+<h2>Métodos disponíveis</h2>
+
+<table>
+<thead><tr><th>Método</th><th>Alvo</th><th>Campo do payload</th></tr></thead>
+<tbody>
+<tr><td><code>sendToUser($userId, ...)</code></td><td>um usuário</td><td><code>include_external_user_ids: [id]</code></td></tr>
+<tr><td><code>sendToMultipleUsers(array $userIds, ...)</code></td><td>vários usuários</td><td><code>include_external_user_ids: [...]</code></td></tr>
+<tr><td><code>sendToAll(...)</code></td><td>todo mundo</td><td><code>included_segments: ['All']</code></td></tr>
+<tr><td><code>sendToSegment($segment, ...)</code></td><td>segmento do painel</td><td><code>included_segments: [segment]</code></td></tr>
+</tbody>
+</table>
+
+<p>Assinatura comum: <code>($title, $message, $url = null, $data = [])</code>. O <code>$url</code> vira <code>url</code> no payload (destino do clique) e só é incluído se não for nulo; <code>$data</code> vira o campo <code>data</code> e é removido do payload quando vazio.</p>
+
+<h2>Quem dispara push hoje</h2>
+
+<table>
+<thead><tr><th>Origem</th><th>Tipo</th><th>Notificação</th></tr></thead>
+<tbody>
+<tr><td><code>CrmTable.php:5099</code></td><td>usuário</td><td><code>LEAD [ticket] - &lt;origem&gt;</code> → <code>/crm/lead/{id}</code> (avisa o responsável do lead novo)</td></tr>
+<tr><td><code>PlugMessageTable.php:1676</code></td><td>usuário</td><td>"Boom Sistemas Informa" → <code>/crm/lead/{id}</code></td></tr>
+<tr><td><code>CrmController.php:6786</code></td><td>usuário (master)</td><td>"Saldo GupShup" acabando → <code>/crm/gerenciar</code></td></tr>
+<tr><td><code>AdminDashboardController.php:155</code></td><td><strong>todos</strong></td><td>"Tabela FIPE atualizada!" → <code>/veiculo</code></td></tr>
+<tr><td><code>NovidadeSistemaController.php:373</code></td><td><strong>todos</strong></td><td>novidade do sistema</td></tr>
+<tr><td><code>AdminDashboardController.php:914</code></td><td>usuário</td><td>envio de teste ("Boom Sistemas (TEST)")</td></tr>
+</tbody>
+</table>
+
+<p>O envio de lead novo é o de maior volume — é ele que dispara a cada lead atribuído.</p>
+
+<h3>Kill switches</h3>
+
+<p>Em <code>Helpers/Desabilitador.php</code> há três chaves independentes. Todas em <code>false</code> hoje (ou seja, push ligado):</p>
+
+<table>
+<thead><tr><th>Flag</th><th>Desliga</th></tr></thead>
+<tbody>
+<tr><td><code>one-signal-push</code></td><td>o <code>send()</code> inteiro <strong>e</strong> o init do SDK no navegador</td></tr>
+<tr><td><code>onesignal-notification-lead</code></td><td>só o push de lead novo</td></tr>
+<tr><td><code>onesignal-novidade-sistema</code></td><td>só o push de novidade do sistema</td></tr>
+</tbody>
+</table>
+
+<h2>Pegadinhas do <code>send()</code></h2>
+
+<h3>1. Kill switch que muda o tipo de retorno</h3>
+
+<pre><code>if (Desabilitador::isDisabled('one-signal-push') || IS_NOT_PRODUCTION) {
+    return 'desabilitado';
+}</code></pre>
+
+<p>Duas coisas aqui:</p>
+
+<ul>
+<li><strong>Push nunca sai fora de produção.</strong> Não adianta testar notificação em dev/staging — o método sai antes do cURL. Para testar de verdade, é no ambiente de produção, pela rota de teste do Admin Dashboard.</li>
+<li><strong>O retorno vira <code>string</code>.</strong> No caminho normal a função devolve <code>['success' =&gt; bool, 'response' =&gt; ..., 'http_code' =&gt; int]</code>; desabilitada, devolve a string <code>'desabilitado'</code>. Qualquer chamador que faça <code>$send['success']</code> sem checar o tipo lê <code>'d'</code> (offset de string) ou dispara warning. Ao consumir o retorno, teste <code>is_array($send)</code> primeiro.</li>
+</ul>
+
+<p>O <code>Desabilitador::isDisabled('one-signal-push')</code> é a chave para desligar push em produção sem deploy — útil em incidente de spam de notificação.</p>
+
+<h3>2. Espaçamento entre envios (era <code>sleep(1)</code>)</h3>
+
+<p><strong>Atualizado (ago/2026).</strong> O <code>sleep(1)</code> incondicional que existia depois de cada <code>curl_exec</code> foi removido. Custava ~17.000 s de worker por dia só no webhook de WhatsApp (45% do tempo dele), inclusive quando o request mandava um único push — caso em que não havia nada para espaçar. E como o sleep era por worker, nunca funcionou como rate limit global: com 90 workers saíam 90 pushes/s do mesmo jeito.</p>
+
+<p>O que existe hoje:</p>
+
+<pre><code>const INTERVALO_MINIMO = 1.0;       // segundos entre dois envios do MESMO worker
+private static $ultimoEnvio = 0.0;
+
+if (self::$ultimoEnvio &gt; 0.0) {
+    $desde = microtime(true) - self::$ultimoEnvio;
+    if ($desde &lt; self::INTERVALO_MINIMO) {
+        usleep((int) round((self::INTERVALO_MINIMO - $desde) * 1000000));
+    }
+}</code></pre>
+
+<p>Quem manda um push só não paga nada; uma sequência de pushes no mesmo worker continua espaçada como antes. Também entraram timeouts de cURL (<code>CURLOPT_CONNECTTIMEOUT</code> e <code>CURLOPT_TIMEOUT</code> = <code>TIMEOUT_MEDIUM</code>) — antes não havia teto nenhum. É <code>MEDIUM</code> e não <code>SMALL</code> de propósito: <code>sendToMultipleUsers()</code> manda um lote de ids, e um teto curto derrubaria o lote inteiro, que aqui vira notificação perdida sem retry.</p>
+
+<p>A recomendação de preferir <code>sendToMultipleUsers()</code> a um loop de <code>sendToUser()</code> continua valendo — uma chamada em vez de N.</p>
+
+<h3>3. <code>CURLOPT_SSL_VERIFYPEER = false</code></h3>
+
+<pre><code>curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);</code></pre>
+
+<p>A validação do certificado TLS está desligada na chamada para o OneSignal. Como a REST API key vai no header dessa mesma requisição, isso enfraquece a proteção contra interceptação no caminho. Não há motivo técnico aparente (o certificado do <code>onesignal.com</code> é público e válido) — é candidato a remoção.</p>
+
+<h3>4. Falha de push não está sendo logada</h3>
+
+<pre><code>if (!$out['success']) {
+    handleLog(false, json_encode($out), 'one-signal', 'push', false, '2026-03-31 23:59:59');
+}</code></pre>
+
+<p>O último parâmetro é o <code>$expires</code> do <code>handleLog()</code>, e a implementação descarta o log quando a data já passou:</p>
+
+<pre><code>if ($expiryDate &amp;&amp; $now &gt; $expiryDate) {
+    return;   // sai sem gravar nada
+}</code></pre>
+
+<p><strong>Como <code>2026-03-31</code> já passou, todo erro de push é silenciosamente descartado desde então.</strong> HTTP 400/401/429 do OneSignal não aparece em lugar nenhum. Se a suspeita for "push parou de chegar", esse log <em>não</em> vai ajudar até alguém empurrar a data (ou remover o parâmetro). Isso não é exclusivo do OneSignal — ver a seção de logs expirados em <a href="/infraestrutura/new-relic">New Relic</a>.</p>
+
+<hr>
+
+<h2>Lado do dispositivo — por que o usuário não recebe</h2>
+
+<p>Todo o resto desta página trata de <strong>envio</strong>. A maioria absoluta dos cartões de suporte sobre notificação, porém, não é envio: é <strong>assinatura</strong>. O usuário nunca virou um destinatário válido. Esta seção é o roteiro para provar isso em minutos, sem depender de print.</p>
+
+<h3>Como o cliente assina</h3>
+
+<p>Dois caminhos, ambos só aparecem <strong>em produção e com usuário logado</strong>:</p>
+
+<ul>
+<li><strong>Sininho flutuante do OneSignal</strong> (<code>notifyButton.enable: true</code> no init). É ele que mostra o modal <em>"Unblock Notifications"</em> quando a permissão está bloqueada.</li>
+<li><strong>Sininho do header</strong> (<code>#notification-one-signal</code> em <code>menu.phtml</code>), que chama <code>OneSignal.Notifications.requestPermission()</code> / <code>PushSubscription.optIn()</code>.</li>
+</ul>
+
+<p><strong>Pegadinha:</strong> em <code>layout.phtml</code> há uma lista de URLs onde o sininho flutuante é escondido por CSS:</p>
+
+<pre><code>$urlsOcultas = ['lead', 'crm/view/list'];
+// -> display:none em div#onesignal-bell-launcher</code></pre>
+
+<p>O <code>strpos</code> é sobre a <code>REQUEST_URI</code> inteira, então <strong>qualquer</strong> URL que contenha a substring <code>lead</code> esconde o sininho flutuante. Se o cliente vive na tela de leads e diz "não tem onde ativar", é isso — o sininho do header continua lá, mas o flutuante não.</p>
+
+<h3>Auditoria por API (somente leitura)</h3>
+
+<p>O endpoint de usuário do OneSignal responde por <code>external_user_id</code> e é o jeito mais rápido de saber o estado real de cada aparelho:</p>
+
+<pre><code>cd ~/boom_docker_stack/Projects/app.boomsistemas.com.br
+set -a &amp;&amp; . ./.env &amp;&amp; set +a
+
+EXT=$(php -r 'echo $argv[1]."_".sha1("__".$argv[1]);' 12964)
+
+curl -s "https://api.onesignal.com/apps/$ONESIGNAL_APP_ID/users/by/external_id/$EXT" \
+  -H "Authorization: Basic $ONESIGNAL_REST_API_KEY" \
+  -H "Accept: application/json" | python3 -m json.tool</code></pre>
+
+<p>Cada aparelho é uma entrada em <code>subscriptions[]</code>. Os campos que importam:</p>
+
+<table>
+<thead><tr><th>Campo</th><th>Como ler</th></tr></thead>
+<tbody>
+<tr><td><code>token</code></td><td><strong>A verdade.</strong> É o endpoint de push emitido pelo navegador/SO. Vazio = não existe destinatário, ponto. <code>fcm.googleapis.com</code> = Chrome; <code>notify.windows.com</code> (WNS) = Edge; <code>web.push.apple.com</code> = Safari.</td></tr>
+<tr><td><code>notification_types</code></td><td>Motivo (tabela abaixo).</td></tr>
+<tr><td><code>device_model</code></td><td><code>Win32</code>, <code>Linux armv81</code> (Android), <code>iPhone</code>, <code>MacIntel</code>.</td></tr>
+<tr><td><code>device_os</code></td><td>Versão <strong>maior do navegador</strong>, não do SO. ~140-155 = Chrome/Edge; ~29-30 = Samsung Internet; <code>18.x</code> = Safari/iOS.</td></tr>
+<tr><td><code>session_count</code> / <code>session_time</code></td><td>Quantas vezes o SDK rodou nesse aparelho. Alto + <code>token</code> vazio = <strong>o nosso código roda, o navegador é que não libera</strong>.</td></tr>
+<tr><td><code>web_auth</code> / <code>web_p256</code></td><td>Par de chaves VAPID gerado localmente pelo SDK. Presente = SDK carregou e service worker registrou.</td></tr>
+</tbody>
+</table>
+
+<h3><code>notification_types</code> — o que cada valor significa na prática</h3>
+
+<table>
+<thead><tr><th>Valor</th><th>Significado</th><th><code>token</code></th><th>Dá para resolver?</th></tr></thead>
+<tbody>
+<tr><td><code>1</code></td><td>Inscrito e apto a receber</td><td>presente</td><td>Nada a fazer — se não chega, o problema é no <strong>envio</strong></td></tr>
+<tr><td><code>-2</code></td><td>Opt-out voluntário (clicou no sininho para desativar)</td><td>pode existir</td><td>Sim: clicar no sininho de novo</td></tr>
+<tr><td><code>-10</code></td><td><strong>Permissão de notificação não concedida / revogada no navegador</strong></td><td><strong>vazio</strong></td><td>Só o usuário, nas configurações do navegador</td></tr>
+<tr><td><code>-99</code></td><td>Registro fantasma: SDK iniciou, prompt nunca foi respondido</td><td>vazio</td><td>Sim: pedir a permissão de novo</td></tr>
+</tbody>
+</table>
+
+<p>Não confie só no número — <strong>cheque o <code>token</code></strong>. Na amostra que serviu de base para esta seção, 100% dos <code>-10</code> e <code>-99</code> tinham <code>token</code> vazio e 100% dos <code>1</code> tinham token. O <code>token</code> é o fato; o <code>notification_types</code> é a explicação.</p>
+
+<h3>Baseline da frota (ago/2026)</h3>
+
+<p>Sem baseline não se sabe se um caso é bug ou normal. App inteiro: <strong>82.705</strong> devices registrados, <strong>2.350</strong> aptos a receber. A proporção assusta mas é típica de web push — a maioria é registro fantasma (<code>-99</code>) de quem abriu o sistema uma vez num navegador.</p>
+
+<p>Amostra dos 120 usuários com acesso mais recente (894 subscriptions):</p>
+
+<table>
+<thead><tr><th>Plataforma</th><th>Total</th><th><code>1</code> (ok)</th><th><code>-10</code></th><th><code>-2</code></th><th><code>-99</code></th></tr></thead>
+<tbody>
+<tr><td>Windows</td><td>630</td><td>46</td><td>49</td><td>84</td><td>451</td></tr>
+<tr><td>Linux desktop</td><td>177</td><td>1</td><td>0</td><td>4</td><td>172</td></tr>
+<tr><td>Android</td><td>45</td><td>8</td><td>9</td><td>5</td><td>23</td></tr>
+<tr><td>macOS</td><td>26</td><td>1</td><td>3</td><td>2</td><td>20</td></tr>
+<tr><td>iOS</td><td>16</td><td>6</td><td>1</td><td>0</td><td>9</td></tr>
+</tbody>
+</table>
+
+<p><strong>Conclusão que essa tabela permite:</strong> Android e iOS funcionam. Há Android com <code>token</code> válido e 226, 254 e 497 sessões. Então "não funciona no celular" nunca é limitação da nossa integração — é sempre aquele aparelho/navegador.</p>
+
+<h3>Árvore de decisão</h3>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  A["Usuario nao recebe push"] --> B["GET users/by/external_id"]
+  B --> C{"Existe subscription<br/>desse aparelho?"}
+  C -->|"Nao"| D["SDK nunca rodou ali:<br/>adblock, DNS filtrante,<br/>ou nao logou nesse navegador"]
+  C -->|"Sim"| E{"token vazio?"}
+  E -->|"nt = -10"| F["Permissao NEGADA no site.<br/>Codigo nao reverte:<br/>so o usuario reseta"]
+  E -->|"nt = -99"| G["Prompt nunca respondido:<br/>pedir permissao de novo"]
+  E -->|"nt = -2"| H["Opt-out voluntario:<br/>clicar no sininho"]
+  E -->|"nt = 1"| I["Assinatura OK.<br/>Problema esta no ENVIO"]
+  I --> J["Checar buildUserId,<br/>kill switch e o log expirado"]
+</code></pre>
+</div>
+
+<h3>A regra dura: permissão negada é beco sem saída para o código</h3>
+
+<p>Quando <code>Notification.permission === 'denied'</code>, a spec da Notifications API manda o navegador <strong>resolver <code>requestPermission()</code> na hora, sem exibir prompt</strong>. Não existe SDK, versão ou truque que reabra aquela janela — nem o OneSignal, nem código nosso. A liberação é obrigatoriamente manual, nas configurações do navegador do usuário.</p>
+
+<p>É por isso que o modal <em>"Unblock Notifications"</em> do OneSignal só mostra instruções: é tudo o que ele pode fazer. Antes de abrir investigação de bug, confirme se não é este caso — economiza horas.</p>
+
+<p><strong>Melhoria pendente no nosso lado:</strong> hoje, com a permissão em <code>denied</code>, clicar no sininho do header não faz <strong>nada</strong> — sem prompt, sem aviso, sem erro (<code>menu.phtml:182-207</code>). O SDK v16 expõe <code>OneSignal.Notifications.permissionNative</code> (<code>'default' | 'granted' | 'denied'</code>), então dá para detectar e mostrar o passo a passo em vez do silêncio.</p>
+
+<h3>Como o usuário libera, por dispositivo</h3>
+
+<h4>Samsung Internet (Android)</h4>
+<ol>
+<li>☰ → <strong>Configurações</strong> → <strong>Sites e downloads</strong> → <strong>Notificações</strong> → localizar <code>boomsistemas.com.br</code> → <strong>Permitir</strong>.</li>
+<li>Se o site não aparecer na lista: <strong>Configurações</strong> → <strong>Privacidade e segurança</strong> → <strong>Dados pessoais do navegador</strong> → limpar dados do site e acessar de novo (o prompt volta ao estado inicial).</li>
+<li>Checar o <strong>Samsung Push Service</strong>: Configurações do Android → <strong>Apps</strong> → menu → <strong>Mostrar apps do sistema</strong> → <em>Samsung Push Service</em> → tem que estar <strong>ativado</strong>. Desativado, o Samsung Internet não emite <code>token</code> mesmo com tudo permitido.</li>
+</ol>
+
+<h4>Chrome (Android)</h4>
+<ol>
+<li>⋮ → <strong>Configurações</strong> → <strong>Configurações do site</strong> → <strong>Notificações</strong> → <code>boomsistemas.com.br</code> → <strong>Permitir</strong>.</li>
+<li><strong>Android 13+ tem duas camadas.</strong> Além da permissão do site, o <em>app</em> Chrome precisa de permissão de notificação no SO (<code>POST_NOTIFICATIONS</code>): Configurações do Android → <strong>Apps</strong> → <strong>Chrome</strong> → <strong>Notificações</strong> → ativado. Liberar só uma das duas não resolve, e é o erro mais comum na triagem — o print do suporte quase sempre mostra a camada do SO, não a do site.</li>
+<li>Web push no Chrome Android depende do <strong>Google Play Services</strong>. Aparelho sem GMS (ou com GMS desativado) não recebe.</li>
+</ol>
+
+<h4>Chrome / Edge (desktop)</h4>
+<ul>
+<li><code>chrome://settings/content/notifications</code> (ou <code>edge://settings/content/notifications</code>) → procurar o site → <strong>Permitir</strong>.</li>
+<li>Para zerar de vez: <code>chrome://settings/content/siteDetails?site=https://boomsistemas.com.br</code> → <strong>Redefinir permissões</strong>.</li>
+<li>No Windows, checar <strong>Assistente de foco / Não perturbe</strong> e <strong>Configurações → Sistema → Notificações</strong> para o navegador. A notificação pode estar chegando e sendo suprimida pelo SO.</li>
+</ul>
+
+<h4>iOS / iPadOS (Safari)</h4>
+<ul>
+<li>Web push exige <strong>iOS 16.4+</strong> e, obrigatoriamente, o site <strong>adicionado à Tela de Início</strong> (Compartilhar → Adicionar à Tela de Início). No Safari em aba comum <strong>não funciona</strong>, por decisão da Apple. Depois de instalar, abrir pelo ícone e ativar o sininho.</li>
+<li>Confirmado funcionando: há <code>SafariPush</code> com <code>token</code> válido na frota.</li>
+</ul>
+
+<h4>Bateria e segundo plano (Samsung/Xiaomi principalmente)</h4>
+<ul>
+<li>Configurações → <strong>Bateria</strong> → <strong>Limites de uso em segundo plano</strong> → o navegador não pode estar em "apps em suspensão" nem em "apps em suspensão profunda".</li>
+<li>Configurações → Apps → navegador → <strong>Bateria</strong> → <strong>Sem restrições</strong>.</li>
+<li>Isso não impede a <em>assinatura</em>, mas atrasa ou engole a <em>entrega</em>. Sintoma típico: chega tudo de uma vez quando o usuário abre o navegador.</li>
+</ul>
+
+<h3>Bloqueador de anúncios e DNS filtrante</h3>
+
+<p>Causa subestimada e fácil de confirmar. O domínio <code>onesignal.com</code> está em listas de privacidade largamente usadas (EasyPrivacy, ativada por padrão no uBlock Origin), então:</p>
+
+<ul>
+<li><strong>Desktop:</strong> extensão de bloqueio (uBlock, AdBlock, AdGuard, escudos do Brave) impede o <code>OneSignalSDK.page.js</code> de carregar. O sininho simplesmente não aparece e <strong>nenhuma subscription é criada</strong>.</li>
+<li><strong>Android:</strong> <strong>DNS privado</strong> apontando para AdGuard/NextDNS bloqueia em <em>todos</em> os navegadores do aparelho de uma vez.</li>
+</ul>
+
+<p>Assinatura de reconhecimento: no OneSignal <strong>não existe registro nenhum</strong> daquele navegador — nem <code>-99</code>. Se o usuário jura que tentou e não há registro, é isso.</p>
+
+<p>Teste que o suporte pode pedir, sem termo técnico: abrir este endereço direto no navegador —</p>
+
+<pre><code>https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js</code></pre>
+
+<p>Se aparecer código, está liberado. Se der erro ou página em branco, está bloqueado. Correção: liberar <code>boomsistemas.com.br</code> no bloqueador, ou Configurações → Conexões → Mais configurações de conexão → <strong>DNS privado</strong> → Desativado.</p>
+
+<h3>Caso real — cartão #4005 (ago/2026)</h3>
+
+<p>"Cliente não consegue habilitar as notificações do celular. Tentado no Chrome e no Samsung Browser." Galaxy S20 FE (SM-G781B), Android 13. A auditoria por API resolveu em duas consultas:</p>
+
+<table>
+<thead><tr><th>Aparelho</th><th><code>token</code></th><th><code>nt</code></th><th>Sessões</th><th>Leitura</th></tr></thead>
+<tbody>
+<tr><td><code>Win32</code>, v151</td><td><code>notify.windows.com</code></td><td><code>1</code></td><td>1</td><td>Edge, funcionando</td></tr>
+<tr><td><code>Linux armv81</code>, v30</td><td><strong>vazio</strong></td><td><code>-10</code></td><td><strong>124</strong></td><td>Samsung Internet: SDK rodou 124x, permissão negada</td></tr>
+</tbody>
+</table>
+
+<p>Três conclusões, todas verificáveis:</p>
+
+<ol>
+<li><code>web_auth</code>/<code>web_p256</code> presentes com <code>token</code> vazio e 124 sessões ⇒ <strong>nosso código e o service worker funcionaram</strong>; o navegador é que nunca liberou.</li>
+<li>Havia outros dois aparelhos na frota com <strong>Samsung Internet v30</strong> e <code>token</code> válido ⇒ não é limitação do navegador nem da versão.</li>
+<li>Zero registro de Chrome (desktop ou mobile) ⇒ o SDK nunca rodou no Chrome dele, apesar de funcionar no Edge. Padrão de bloqueador/DNS.</li>
+</ol>
+
+<p>Fim de investigação: <strong>não há correção de código possível</strong>, e a resposta ao cliente é o procedimento por dispositivo acima. O print de "Notificações do aplicativo → Samsung Browser → Permitir: ativado" que veio no cartão mostra a camada do <em>SO</em>, não a do <em>site</em> — as duas são independentes, e é a do site que estava bloqueada.</p>
+
+<h2>Checklist de diagnóstico</h2>
+
+<p><strong>Primeiro descubra de que lado está o problema.</strong> Uma consulta ao endpoint de usuário separa "não assinou" de "não enviamos", e é sempre o passo 1.</p>
+
+<h3>Lado do dispositivo (assinatura)</h3>
+<ol>
+<li><strong>Existe subscription daquele aparelho?</strong> <code>GET /apps/{app_id}/users/by/external_id/{buildUserId}</code>. Não existe ⇒ o SDK não rodou ali (bloqueador, DNS filtrante, ou nunca logou nesse navegador).</li>
+<li><strong>O <code>token</code> está vazio?</strong> Vazio ⇒ não existe destinatário, e nenhum envio vai chegar nunca.</li>
+<li><strong><code>notification_types = -10</code>?</strong> Permissão negada no site. Só o usuário reverte — mandar o procedimento do navegador dele.</li>
+<li><strong><code>-99</code> com 0-1 sessão?</strong> Registro fantasma, ignorar. Ele nunca respondeu ao prompt.</li>
+<li><strong>Android 13+:</strong> conferir as <strong>duas</strong> camadas (permissão do site <em>e</em> permissão de notificação do app navegador no SO).</li>
+<li><strong>iOS:</strong> o site está adicionado à Tela de Início? Sem isso não existe web push.</li>
+<li><strong>O sininho aparece?</strong> Em URL que contenha <code>lead</code> ou <code>crm/view/list</code>, o flutuante é escondido por CSS — usar o do header.</li>
+</ol>
+
+<h3>Lado do servidor (envio)</h3>
+<ol>
+<li><strong>Está em produção?</strong> Fora dela, <code>send()</code> devolve <code>'desabilitado'</code> e nada sai.</li>
+<li><strong>O kill switch está ligado?</strong> Conferir as três flags em <code>Desabilitador.php</code>.</li>
+<li><strong>O id está no formato certo?</strong> Tem que ser <code>buildUserId($user_id)</code>, não o <code>user_id</code> cru. Id errado = HTTP 200 e ninguém notificado.</li>
+<li><strong>Erro de API?</strong> Hoje não há log (pegadinha 4). Para investigar, empurre a data do <code>handleLog</code> ou inspecione o retorno no ponto de chamada.</li>
+<li><strong>Origem confere?</strong> O SDK tem que rodar em <code>boomsistemas.com.br</code>, mesma origem do <code>chrome_web_origin</code> do app.</li>
+</ol>

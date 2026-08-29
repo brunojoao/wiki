@@ -1,0 +1,66 @@
+<!--
+title: Finalização de Leads
+description: Finalização de leads usando SQL.
+published: 1
+date: 2026-08-26T15:03:03.649Z
+tags: crm, sql
+editor: ckeditor
+dateCreated: 2025-10-15T18:26:25.306Z
+-->
+
+<pre><code class="language-plaintext">-- Variáveis
+SET @DATA_SOLICITADA = '2025-10-15 23:59:59';
+SET @DATA_PROCESSAMENTO = '2025-10-15 12:00:00';
+SET @FILIAL_ID = 1902;       -- Filial a ser processada
+SET @USER_ID = 9223;         -- Usuário responsável pelo lead
+SET @USER_FINALIZADOR = 9211; -- Usuário master da loja
+SET @MOTIVO_ID = 16;          -- Motivo: "outros"
+
+-- 1️⃣ Seleção dos leads a processar
+SELECT l.*
+FROM sis_crm_lead l
+JOIN sis_crm_lead_user lu ON lu.crm_lead_id = l.crm_lead_id
+WHERE l.status_id NOT IN (3, 4)
+  AND l.crm_lead_data_cadastro &lt; @DATA_SOLICITADA
+  AND l.filial_id = @FILIAL_ID
+  AND lu.user_id = @USER_ID;
+
+-- 2️⃣ Atualização do status dos leads
+UPDATE sis_crm_lead l
+JOIN sis_crm_lead_user lu ON lu.crm_lead_id = l.crm_lead_id
+SET 
+    l.status_id = 3,
+    l.crm_lead_data_update = @DATA_PROCESSAMENTO
+WHERE l.status_id NOT IN (3, 4)
+  AND l.crm_lead_data_cadastro &lt; @DATA_SOLICITADA
+  AND l.filial_id = @FILIAL_ID
+  AND lu.user_id = @USER_ID;
+
+-- 3️⃣ Inserção na tabela de leads finalizados
+INSERT INTO sis_crm_lead_finalizado (
+     crm_lead_id,
+     motivo_id,
+     crm_lead_finalizado_user_id,
+     crm_lead_finalizado_status,
+     crm_lead_finalizado_obs
+)
+SELECT
+    l.crm_lead_id,
+    @MOTIVO_ID,
+    @USER_FINALIZADOR,
+    0,
+    'Finalizado via processamento em massa.'
+FROM sis_crm_lead l
+JOIN sis_crm_lead_user lu ON lu.crm_lead_id = l.crm_lead_id
+WHERE l.status_id = 3
+  AND l.crm_lead_data_cadastro &lt; @DATA_SOLICITADA
+  AND l.filial_id = @FILIAL_ID
+  AND lu.user_id = @USER_ID
+  AND l.crm_lead_data_update = @DATA_PROCESSAMENTO;
+</code></pre>
+<h3><br><strong>Descrição do chamado (Trello)</strong></h3>
+<p><strong>Título:</strong> <code>[1902] Freitas e Dessanti - CRM - Finalização de leads</code><br><strong>Objetivo:</strong> Finalizar todos os leads antigos de um usuário específico, marcando como “não concluído” e categorizando como “outros”. Avisar o cliente e registrar a finalização no sistema.</p>
+<p><strong>Etapas:</strong></p>
+<p>Selecionar os leads que não foram concluídos.</p>
+<p>Atualizar o status desses leads para “concluído”.</p>
+<p>Inserir os registros na tabela <code>sis_crm_lead_finalizado</code> para controle histórico.</p>

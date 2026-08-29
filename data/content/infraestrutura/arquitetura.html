@@ -1,0 +1,897 @@
+<!--
+title: Arquitetura de Infraestrutura
+description: Mapa completo: VPC sem subnet privada, RDS master + 3 replicas, stacks Docker por EC2, Kong sem upstreams e o Gotenberg do centralizador.
+published: 1
+date: 2026-08-27T03:34:41.220Z
+tags: arquitetura, aws, docker, ec2, infraestrutura, kong, rds, rede
+editor: ckeditor
+dateCreated: 2026-08-27T03:24:08.659Z
+-->
+
+<h1>Arquitetura de Infraestrutura</h1>
+
+<p>Mapa da infraestrutura da Boom levantado via AWS CLI <em>read-only</em> (profile <code>claude-ro</code>), Admin API do Kong de produção e inspeção SSH das EC2. <strong>Coleta: 27/08/2026.</strong></p>
+
+<p>Conta AWS <code>384916510164</code>. Região de produção: <strong><code>sa-east-1</code></strong> — 1 VPC, 10 EC2, 4 RDS, 2 ALB, 2 Lambda. Existe ainda 1 VPC + 1 EC2 solta em <code>us-west-1</code> (Elastic Beanstalk do <code>homolog</code>); as outras 15 regiões estão vazias.</p>
+
+<blockquote>
+<p>Páginas relacionadas: <a href="/pt-br/aws/inbound-rules">Inbound Rules — Security Groups</a> · <a href="/pt-br/apis/kong">Kong APIs</a> · <a href="/pt-br/infraestrutura/terminator">Terminator</a> · <a href="/pt-br/infraestrutura/new-relic">New Relic</a></p>
+</blockquote>
+
+<h2>1. Visão geral: DNS, rede e entrada</h2>
+
+<h3>1.1 A topologia real da VPC</h3>
+
+<p>Antes do diagrama, três fatos que contrariam o desenho "de manual" e explicam quase todas as decisões de security group abaixo:</p>
+
+<ul>
+<li><strong>A VPC é a <em>default</em> da conta</strong> — <code>vpc-0fc84ab2372e975e1</code>, <code>172.31.0.0/16</code>, criada pela AWS, não por IaC.</li>
+<li><strong>Não existe subnet privada.</strong> As três subnets têm <code>MapPublicIpOnLaunch = true</code> e compartilham uma única route table (<code>rtb-0ec61782c27a3c22c</code>, a <em>main</em>) com rota <code>0.0.0.0/0 → igw-0d131388d2fa1b434</code>. Toda EC2 nasce com IP público.</li>
+<li><strong>Não existe NAT Gateway.</strong> Não há o que rotear: nada está atrás de subnet privada.</li>
+</ul>
+
+<p>Consequência prática: <strong>o isolamento da infra é 100% security group.</strong> Não há camada de rede por baixo dele. Se um SG abrir, o recurso está na internet.</p>
+
+<table>
+<thead><tr><th>Subnet</th><th>CIDR</th><th>AZ</th><th>Pública</th><th>Quem está nela</th></tr></thead>
+<tbody>
+<tr><td><code>subnet-03ae57e295386e2e3</code></td><td><code>172.31.0.0/20</code></td><td>sa-east-1a</td><td>sim</td><td>legado main+slave, kong, api-main, cron, socket, redis-legado, centralizador</td></tr>
+<tr><td><code>subnet-04fd09a41a4c94bc6</code></td><td><code>172.31.16.0/20</code></td><td>sa-east-1b</td><td>sim</td><td>boomia</td></tr>
+<tr><td><code>subnet-071188ed2a0904d65</code></td><td><code>172.31.32.0/20</code></td><td>sa-east-1c</td><td>sim</td><td>papa-entulho</td></tr>
+</tbody>
+</table>
+
+<p>As três subnets formam o DB subnet group <code>default-vpc-0fc84ab2372e975e1</code>, usado por todas as instâncias RDS.</p>
+
+<h3>1.2 Diagrama de entrada</h3>
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  CLI["Navegador / App / Parceiro / Webhook"]
+  R53["Route53<br/>boomsistemas.com.br<br/>47 registros"]
+  CLI --> R53
+
+  R53 -->|"apex + www"| ALB1["ALB spboomsistemas<br/>internet-facing<br/>HTTPS 443"]
+  R53 -->|"api."| ALB2["ALB kong-elb<br/>internet-facing<br/>HTTPS 443"]
+  R53 -->|"arquivos."| CF["CloudFront E1J92RHSM9AMG4<br/>origem S3 us-west-1"]
+  R53 -->|"homolog."| EB["Elastic Beanstalk<br/>us-west-1"]
+  R53 -->|"staging."| STG["EC2 staging<br/>54.176.4.83"]
+
+  subgraph VPC["VPC vpc-0fc84ab2372e975e1 - 172.31.0.0/16 - so subnets publicas"]
+    subgraph AZA["sa-east-1a - subnet-03ae57e295386e2e3"]
+      MAIN["EC2 boomsistemas-legado-main<br/>nginx 80 + php-fpm 7001<br/>172.31.11.184"]
+      SLAVE["EC2 boomsistemas-legado-slave<br/>ligada 08-20h por Lambda<br/>172.31.9.175"]
+      KONG["EC2 kong<br/>Kong 8400 + Grafana 3000<br/>172.31.6.191"]
+      APIEC2["EC2 api-main<br/>AdonisJS 3333<br/>172.31.15.71"]
+      CRON["EC2 cron<br/>Laravel Horizon + redis 6380<br/>172.31.1.226"]
+      SOCK["EC2 socket<br/>Caddy 443 + socket.io<br/>172.31.15.51"]
+      RDL["EC2 redis-legado<br/>redis 6378 + redis2 6377<br/>172.31.12.3"]
+      CENT["EC2 centralizador<br/>Gotenberg PDF + workers<br/>172.31.13.204"]
+    end
+    subgraph AZB["sa-east-1b - subnet-04fd09a41a4c94bc6"]
+      BIA["EC2 boomia<br/>Caddy 443 + php-fpm + redis 6380<br/>172.31.20.209"]
+      RREP2["RDS boomsistemas-replica-2"]
+    end
+    subgraph AZC["sa-east-1c - subnet-071188ed2a0904d65"]
+      PAPA["EC2 papa-entulho<br/>MariaDB 3308<br/>172.31.42.115"]
+      RREP1["RDS boomsistemas-replica-1"]
+      RDEV["RDS boomsistemas-replica-for-dev"]
+    end
+    RMASTER["RDS boomsistemas MASTER<br/>MariaDB 10.6.24 - db.t4g.xlarge<br/>sa-east-1a"]
+  end
+
+  ALB1 -->|"HTTP 80<br/>TG spboomsistemas"| MAIN
+  ALB1 -.->|"registrado quando ligada"| SLAVE
+  ALB2 -->|"HTTP 8400<br/>TG kongs-group"| KONG
+
+  KONG -->|"HTTP 3333"| APIEC2
+  KONG -->|"HTTPS 443 via boomia.duckdns.org"| BIA
+
+  MAIN -->|3306| RMASTER
+  APIEC2 -->|3306| RMASTER
+  CRON -->|3306| RMASTER
+  BIA -->|3306| RMASTER
+
+  RMASTER -->|replicacao| RREP1
+  RMASTER -->|replicacao| RREP2
+  RMASTER -->|replicacao| RDEV
+
+  IGW["Internet Gateway<br/>igw-0d131388d2fa1b434"]
+  VPC --- IGW
+</code></pre>
+</div>
+
+<h3>1.3 Registros DNS que importam</h3>
+
+<table>
+<thead><tr><th>Nome</th><th>Tipo</th><th>Destino</th><th>Observação</th></tr></thead>
+<tbody>
+<tr><td><code>boomsistemas.com.br</code></td><td>A / AAAA</td><td>alias → ALB <code>spboomsistemas</code></td><td>É aqui que o app principal responde</td></tr>
+<tr><td><code>www</code></td><td>A</td><td>alias → ALB <code>spboomsistemas</code></td><td>Mesmo destino do apex</td></tr>
+<tr><td><code>api</code></td><td>A</td><td>alias → ALB <code>kong-elb</code></td><td>Única porta de entrada do Kong</td></tr>
+<tr><td><code>arquivos</code></td><td>A</td><td>CloudFront <code>d1kqxo9rmggxxo</code></td><td>Origem: bucket S3 em <code>us-west-1</code></td></tr>
+<tr><td><code>homolog</code></td><td>A</td><td>ELB Beanstalk <code>us-west-1</code></td><td>Único uso real da região us-west-1</td></tr>
+<tr><td><code>staging</code></td><td>A</td><td><code>54.176.4.83</code></td><td>EC2 fora da VPC de produção</td></tr>
+<tr><td><code>centralizador</code>, <code>sites</code></td><td>A</td><td><code>69.6.212.249</code></td><td>Hospedagem externa, não AWS</td></tr>
+<tr><td><code>assinatura</code></td><td>A</td><td><code>35.239.236.117</code></td><td>GCP</td></tr>
+<tr><td><code>metas</code></td><td>A</td><td><code>104.131.112.132</code></td><td>DigitalOcean</td></tr>
+<tr><td><code>lp</code>, <code>lp2</code>, <code>materiais</code>, <code>gtm</code></td><td>CNAME / A</td><td>GreatPages, Lovable, RD Station, Stape</td><td>Marketing, fora da infra</td></tr>
+<tr><td><code>email</code>, <code>clickemail</code>, <code>mail</code></td><td>CNAME / MX</td><td>SendGrid + Zoho + Brevo</td><td>SPF/DKIM/DMARC configurados</td></tr>
+</tbody>
+</table>
+
+<h4>Duas armadilhas de DNS</h4>
+
+<ul>
+<li><strong>Não existe registro <code>app.boomsistemas.com.br</code>.</strong> O projeto se chama assim no diretório e no repositório, mas em DNS o app principal atende no apex <code>boomsistemas.com.br</code> e em <code>www</code>. Procurar pelo subdomínio <code>app.</code> em log, WAF ou Route53 não retorna nada.</li>
+<li><strong>Há um CloudFront órfão no caminho do apex.</strong> A distribuição <code>E39OTPH5MEJYG3</code> tem <code>boomsistemas.com.br</code> e <code>www</code> como <em>aliases</em> e aponta para o ELB do Beanstalk em <code>us-west-1</code> — mas o Route53 resolve o apex direto para o ALB <code>spboomsistemas</code> em <code>sa-east-1</code>. Ou seja: <strong>o CloudFront está publicado, cobrando e fora do caminho do tráfego.</strong> Antes de mexer nele, confirmar que nada legado ainda usa o domínio <code>d2r8xvm7pzjyqy.cloudfront.net</code>.</li>
+</ul>
+
+<h3>1.4 Load balancers</h3>
+
+<table>
+<thead><tr><th>ALB</th><th>DNS</th><th>SG</th><th>Listener</th><th>Target group</th><th>Alvo atual</th></tr></thead>
+<tbody>
+<tr><td><code>spboomsistemas</code></td><td><code>spboomsistemas-716693696</code></td><td><code>sg-096b932d6edb8acd3</code> <code>loadbalance</code></td><td>HTTPS 443<br/><code>ELBSecurityPolicy-2016-08</code></td><td><code>spboomsistemas</code><br/>HTTP 80, health <code>/aws-check-elb.php</code></td><td><code>i-078200ce5f5c322bb</code> healthy</td></tr>
+<tr><td><code>kong-elb</code></td><td><code>kong-elb-1691822219</code></td><td><code>sg-09b41a885de839a67</code> <code>loadbalance-kong</code></td><td>HTTPS 443<br/><code>ELBSecurityPolicy-TLS13-1-2-Res-2021-06</code></td><td><code>kongs-group</code><br/>HTTP 8400, health <code>/health</code></td><td><code>i-05d85325789d6cc0a</code> healthy</td></tr>
+</tbody>
+</table>
+
+<p>Pontos de atenção nos dois:</p>
+
+<ul>
+<li><strong>Só existe listener 443.</strong> Nenhum dos dois tem listener na 80 — não há redirect HTTP→HTTPS no balanceador. Requisição em <code>http://</code> não é redirecionada, é recusada na conexão.</li>
+<li><strong>O <code>spboomsistemas</code> usa a policy TLS <code>ELBSecurityPolicy-2016-08</code></strong>, que ainda aceita TLS 1.0/1.1. O <code>kong-elb</code> já está em TLS 1.3 restrito. Alinhar os dois é mudança de uma linha e sem impacto para browser moderno.</li>
+<li><strong>No momento da coleta o TG <code>spboomsistemas</code> tinha apenas 1 alvo.</strong> O <code>legado-slave</code> estava <code>stopped</code> — fora da janela 08–20h — e não aparecia registrado. A frota "2 EC2 atrás do balanceador" só é verdade dentro da janela comercial; fora dela o <code>legado-main</code> atende sozinho.</li>
+</ul>
+<h3>1.5 Security groups</h3>
+
+<p>O mapa completo e a explicação da nomenclatura <code>launch-wizard-N</code> estão em <a href="/pt-br/aws/inbound-rules">Inbound Rules</a>. Aqui ficam só os grupos que definem o caminho do tráfego e o acesso ao banco.</p>
+
+<h4>O par que dá acesso ao RDS</h4>
+
+<p>O acesso ao banco por security group é feito pelo par gerado pelo assistente "Connect to RDS" da AWS. Ele funciona em duas peças e nenhuma delas tem CIDR:</p>
+
+<table>
+<thead><tr><th>Grupo</th><th>Papel</th><th>Regra</th></tr></thead>
+<tbody>
+<tr><td><code>sg-0e025eac7d40f799b</code> <code>ec2-rds-4</code></td><td>vai na <strong>EC2</strong></td><td>Sem inbound. Egress <code>TCP 3306 → sg-0a6f0b9803553870e</code></td></tr>
+<tr><td><code>sg-0a6f0b9803553870e</code> <code>rds-ec2-4</code></td><td>vai no <strong>RDS</strong></td><td>Inbound <code>TCP 3306 ← sg-0e025eac7d40f799b</code>. Sem egress</td></tr>
+</tbody>
+</table>
+
+<p>Ter <code>ec2-rds-4</code> anexado é o que dá acesso ao banco. Só cinco instâncias têm:</p>
+
+<table>
+<thead><tr><th>Instância</th><th><code>ec2-rds-4</code></th><th>Por quê</th></tr></thead>
+<tbody>
+<tr><td><code>boomsistemas-legado-main</code></td><td>sim</td><td>app ZF2 lê e escreve</td></tr>
+<tr><td><code>boomsistemas-legado-slave</code></td><td>sim</td><td>mesma stack do main</td></tr>
+<tr><td><code>api-main</code></td><td>sim</td><td>AdonisJS lê e escreve</td></tr>
+<tr><td><code>cron</code></td><td>sim</td><td>jobs Laravel</td></tr>
+<tr><td><code>boomia</code></td><td>sim</td><td>Laravel da IA</td></tr>
+<tr><td><code>socket</code></td><td><strong>não</strong></td><td>não toca banco, só repassa evento</td></tr>
+<tr><td><code>papa-entulho</code></td><td><strong>não</strong></td><td>tem MariaDB próprio, não usa RDS</td></tr>
+<tr><td><code>redis-legado</code></td><td><strong>não</strong></td><td>só cache</td></tr>
+<tr><td><code>centralizador</code></td><td><strong>não</strong></td><td>—</td></tr>
+<tr><td><code>kong</code></td><td><strong>não</strong></td><td>gateway não fala com banco de negócio</td></tr>
+</tbody>
+</table>
+
+<h4>Grupos de borda</h4>
+
+<table>
+<thead><tr><th>Grupo</th><th>Onde</th><th>Inbound</th></tr></thead>
+<tbody>
+<tr><td><code>sg-096b932d6edb8acd3</code><br/><code>loadbalance</code></td><td>ALB spboomsistemas</td><td>80 e 443 de <code>0.0.0.0/0</code>. Egress só 80</td></tr>
+<tr><td><code>sg-09b41a885de839a67</code><br/><code>loadbalance-kong</code></td><td>ALB kong-elb</td><td>443 de <code>0.0.0.0/0</code>. Egress só 8400</td></tr>
+<tr><td><code>sg-04958158c7c361c2d</code><br/><code>kong-and-to-loadbalance</code></td><td>EC2 kong</td><td><code>8400 ← sg-09b41a885de839a67</code> (só o ALB). <code>22 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-06df24f52b98523c5</code><br/><code>launch-wizard-2</code></td><td>EC2 kong</td><td><code>8401-8402 ← 4 IPs fixos</code> (Admin API e GUI). <code>3000 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-0e0e0589d6db182bf</code><br/><code>launch-wizard-1</code></td><td>legado main+slave</td><td>80, 443 e <strong>22</strong> de <code>0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-05ed8ad0cd368f3c9</code><br/><code>launch-wizard-3</code></td><td>api-main</td><td><code>3333 ← 56.126.19.37/32</code> (só o Kong). <code>22 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-088a8d38558ecaab0</code><br/><code>launch-wizard-6</code></td><td>boomia</td><td><code>443 ← 56.126.19.37/32</code> (só o Kong). <code>6380 ← sg-0e0e0589d6db182bf</code> (redis, só do legado). <code>22 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-0394d7e81ff0f92e8</code><br/><code>redis-legado</code></td><td>redis-legado</td><td><code>6377</code> e <code>6378 ← sg-0e025eac7d40f799b</code>. <code>22 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-0c13ba013fb3b7eb0</code><br/><code>launch-wizard-5</code></td><td>cron</td><td><code>8085 ← 2 IPs fixos</code>. <code>22 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-0f7153efb095a9b0c</code><br/><code>launch-wizard-7</code></td><td>socket</td><td><code>3111</code>, <code>443</code> e <code>22</code> de <code>0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-09c9e24910782a0c9</code><br/><code>launch-wizard-4</code></td><td>papa-entulho</td><td><strong><code>3308 ← 0.0.0.0/0</code></strong> e <code>22 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-044518faf56a13082</code><br/><code>rds</code></td><td><strong>RDS</strong></td><td><code>3306 ← 7 IPs públicos /32</code></td></tr>
+</tbody>
+</table>
+
+<p>Dois padrões bons que vale preservar: o Kong só aceita 8400 vindo do SG do ALB, e <code>api-main</code>/<code>boomia</code> só aceitam tráfego de aplicação vindo do IP do Kong. Não existe caminho lateral para essas duas APIs — quem quiser chegar nelas passa pelo gateway.</p>
+
+<h2>2. Amazon RDS — master e réplicas</h2>
+
+<p>Quatro instâncias MariaDB <strong>10.6.24</strong>, todas no subnet group <code>default-vpc-0fc84ab2372e975e1</code>, parameter group <code>custom</code>, storage <code>gp3</code> 25 GB / 3000 IOPS, CA <code>rds-ca-rsa2048-g1</code>, usuário master <code>admin</code>, porta 3306.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph LR
+  M["boomsistemas MASTER<br/>db.t4g.xlarge<br/>sa-east-1a<br/>leitura + escrita"]
+
+  M -->|replicacao assincrona| R1["boomsistemas-replica-1<br/>db.t4g.small<br/>sa-east-1c"]
+  M -->|replicacao assincrona| R2["boomsistemas-replica-2<br/>db.t4g.small<br/>sa-east-1b"]
+  M -->|replicacao assincrona| RD["boomsistemas-replica-for-dev<br/>db.t4g.small<br/>sa-east-1c"]
+
+  APP["app ZF2<br/>legado-main + slave"] -->|escrita| M
+  APP -.->|"leitura: shuffle entre replicas"| R1
+  APP -.-> R2
+
+  API["api.boomsistemas<br/>AdonisJS Lucid"] -->|escrita| M
+  API -.->|leitura| R1
+
+  BIA["boomia<br/>Laravel"] -->|escrita| M
+  BIA -.->|"leitura: read hosts"| R1
+  BIA -.-> R2
+
+  CR["boom_cron<br/>Laravel"] -->|"leitura + escrita"| M
+
+  DEV["DBGate con6<br/>dev e dumps"] -.-> RD
+</code></pre>
+</div>
+
+<table>
+<thead><tr><th></th><th>master</th><th>replica-1</th><th>replica-2</th><th>replica-for-dev</th></tr></thead>
+<tbody>
+<tr><td>Classe</td><td><code>db.t4g.xlarge</code></td><td><code>db.t4g.small</code></td><td><code>db.t4g.small</code></td><td><code>db.t4g.small</code></td></tr>
+<tr><td>AZ</td><td>sa-east-1a</td><td>sa-east-1c</td><td>sa-east-1b</td><td>sa-east-1c</td></tr>
+<tr><td>Endpoint</td><td colspan="4"><code>&lt;identificador&gt;.c1wux5be8kpd.sa-east-1.rds.amazonaws.com:3306</code></td></tr>
+<tr><td>Multi-AZ</td><td>não</td><td>não</td><td>não</td><td>não</td></tr>
+<tr><td>Backup (dias)</td><td><strong>2</strong></td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>Storage encrypted</td><td>não</td><td>não</td><td>não</td><td>não</td></tr>
+<tr><td>Performance Insights</td><td>não</td><td>não</td><td>não</td><td>não</td></tr>
+<tr><td>Publicly accessible</td><td><strong>sim</strong></td><td><strong>sim</strong></td><td><strong>sim</strong></td><td><strong>sim</strong></td></tr>
+</tbody>
+</table>
+
+<p>Janelas: backup <code>03:00–03:30 UTC</code>, manutenção <code>domingo 00:54–01:24 UTC</code>. Réplica com retenção 0 é o padrão da AWS e é esperado — read replica não faz backup próprio; o que protege os dados é a retenção do master.</p>
+
+<h3>2.1 Quem acessa a porta 3306</h3>
+
+<p>Duas portas de entrada distintas no mesmo banco, e é importante não confundi-las:</p>
+
+<ol>
+<li><strong>Por security group</strong> — <code>sg-0a6f0b9803553870e</code> aceita 3306 do SG <code>ec2-rds-4</code>. É por aqui que as cinco EC2 de aplicação falam com o banco. Tráfego interno da VPC, sem passar pela internet.</li>
+<li><strong>Por IP público</strong> — <code>sg-044518faf56a13082</code> (<code>rds</code>) aceita 3306 de <strong>sete <code>/32</code> públicos</strong>: <code>189.4.122.30</code>, <code>189.4.123.12</code>, <code>189.4.104.145</code>, <code>45.166.204.43</code>, <code>187.56.78.67</code>, <code>162.120.186.148</code>, <code>138.122.67.42</code>. São as máquinas do time — é o que faz o DBGate local conectar em produção.</li>
+</ol>
+
+<h4>Sobre o "isolamento" do RDS</h4>
+
+<p>Vale registrar sem rodeio, porque a suposição comum é a oposta: <strong>as quatro instâncias RDS estão com <code>PubliclyAccessible = true</code> e resolvem para IP público.</strong> Não há proibição de acesso externo em nível de rede — o que impede o mundo de conectar é exclusivamente a lista de sete IPs do SG <code>rds</code>.</p>
+
+<p>Isso funciona, mas tem três consequências operacionais que valem estar documentadas:</p>
+
+<ul>
+<li>IP residencial do time muda. Quando um dev "perde o acesso ao banco do nada", a causa quase sempre é essa lista — não credencial.</li>
+<li>A superfície do banco é a internet inteira, filtrada por SG. Sem criptografia em repouso (<code>StorageEncrypted = false</code>) e sem <code>rds.force_ssl</code> no parameter group <code>custom</code>, a conexão do DBGate trafega em claro se o cliente não pedir TLS.</li>
+<li>Retenção de 2 dias no master é curta para recuperar erro humano descoberto na segunda-feira sobre algo feito na sexta.</li>
+</ul>
+
+<p>Nada disso é incidente e nada precisa mudar hoje — mas é a diferença entre o desenho presumido e o desenho real, e é a informação que falta quando alguém for planejar a próxima mudança de banco.</p>
+<h2>3. Servidores EC2 e stacks Docker</h2>
+
+<p>Todas as instâncias usam a key pair <code>new-prod-sp</code> e ficam na subnet pública da sua AZ. O comando SSH de cada uma está no config do Terminator — ver <a href="/pt-br/infraestrutura/terminator">Terminator</a>. Percentual de disco é do momento da coleta. A <code>centralizador</code> é a única sem entrada no Terminator — o comando dela está em 3.9.</p>
+
+<table>
+<thead><tr><th>Nome</th><th>Instance ID</th><th>Tipo</th><th>AZ</th><th>IP privado</th><th>IP público</th><th>Estado</th></tr></thead>
+<tbody>
+<tr><td><code>boomsistemas-legado-main</code></td><td><code>i-078200ce5f5c322bb</code></td><td>t3.medium</td><td>1a</td><td>172.31.11.184</td><td>18.228.80.150</td><td>running</td></tr>
+<tr><td><code>boomsistemas-legado-slave</code></td><td><code>i-01dfbf8a2e058ae2d</code></td><td>t3.medium</td><td>1a</td><td>172.31.9.175</td><td>54.207.200.116</td><td>08–20h</td></tr>
+<tr><td><code>kong</code></td><td><code>i-05d85325789d6cc0a</code></td><td>t3.small</td><td>1a</td><td>172.31.6.191</td><td>56.126.19.37</td><td>running</td></tr>
+<tr><td><code>api-main</code></td><td><code>i-090c7f2680a3226dd</code></td><td>t3.small</td><td>1a</td><td>172.31.15.71</td><td>52.67.152.88</td><td>running</td></tr>
+<tr><td><code>cron</code></td><td><code>i-0ce2d6741f6b3b630</code></td><td>t3.micro</td><td>1a</td><td>172.31.1.226</td><td>18.228.26.29</td><td>running</td></tr>
+<tr><td><code>boomia</code></td><td><code>i-01ff7612fda394279</code></td><td>t3.micro</td><td><strong>1b</strong></td><td>172.31.20.209</td><td>54.233.54.186</td><td>running</td></tr>
+<tr><td><code>socket</code></td><td><code>i-066306a5a4851fc26</code></td><td>t3.micro</td><td>1a</td><td>172.31.15.51</td><td>15.228.228.151</td><td>running</td></tr>
+<tr><td><code>papa-entulho</code></td><td><code>i-077a6f0961a31a8ed</code></td><td>t3.micro</td><td><strong>1c</strong></td><td>172.31.42.115</td><td>18.230.209.162</td><td>running</td></tr>
+<tr><td><code>redis-legado</code></td><td><code>i-0edd22d3b50f9ad2a</code></td><td>t3.small</td><td>1a</td><td>172.31.12.3</td><td>54.233.59.49</td><td>running</td></tr>
+<tr><td><code>centralizador</code></td><td><code>i-0a6c05d10d70020be</code></td><td>t3.small</td><td>1a</td><td>172.31.13.204</td><td>52.67.141.237</td><td>running</td></tr>
+</tbody>
+</table>
+
+<h3>3.1 <code>boomsistemas-legado-main</code> e <code>-slave</code> — app principal ZF2</h3>
+
+<p>Stack em <code>~/boom_docker_stack_production/</code>. Ubuntu 24.04. Disco 22 GB, 30% usado. SGs <code>launch-wizard-1</code> + <code>ec2-rds-4</code>.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>Rede</th><th>Porta</th><th>Volumes</th></tr></thead>
+<tbody>
+<tr><td><code>nginx</code></td><td>build local <code>Dockerfiles/nginx</code></td><td><code>network_mode: host</code></td><td>80 direto no host</td><td><code>Projects/app.boomsistemas.com.br</code><br/><code>FilesConfigs/Nginx/nginx.conf</code></td></tr>
+<tr><td><code>php7</code></td><td><code>brunojoao3/boom_docker_stack:php7-prod</code></td><td><code>network_mode: host</code></td><td>php-fpm 7001 no host</td><td>projeto + <code>php.ini</code>, <code>www.conf</code>, <code>zz-docker.conf</code><br/><code>./logs-php:/var/log/php-fpm</code></td></tr>
+</tbody>
+</table>
+
+<p>Três detalhes desta stack que não são óbvios:</p>
+
+<ul>
+<li><strong>Os dois containers usam <code>network_mode: host</code></strong>, não bridge. Não há mapeamento <code>host:container</code> — o nginx escuta a 80 do host diretamente, que é onde o TG <code>spboomsistemas</code> faz health check em <code>/aws-check-elb.php</code>.</li>
+<li><strong>O agente PHP do New Relic é compilado no build</strong>, via build args <code>NEW_RELIC_LICENSE_KEY</code> e <code>NEW_RELIC_APPNAME</code>, e o <code>newrelic-daemon</code> sobe no <code>command</code> antes do <code>php-fpm</code>. Detalhes de instrumentação em <a href="/pt-br/infraestrutura/new-relic">New Relic</a>.</li>
+<li><strong>Há um <code>extra_hosts</code> fixando <code>boom-socket.duckdns.org → 172.31.15.51</code></strong>, com um comentário longo no compose explicando o porquê: mantém a chamada ao socket dentro da VPC em vez de sair pelo IGW, e continua sendo <em>hostname</em> — e não IP — porque o Caddy do socket tem um único site block casado no hostname e recusa o handshake TLS se o SNI vier diferente. <code>network_mode: host</code> não dispensa isso: o container tem <code>/etc/hosts</code> próprio gerado pelo Docker e não lê o do host. <strong>Se a EC2 do socket for recriada, esse IP precisa ser atualizado nos dois hosts</strong> (main e slave).</li>
+</ul>
+
+<p>O <code>slave</code> roda a mesma stack e é ligado/desligado por Lambda (seção 6). Fora da janela, SSH nele dá timeout — é esperado, não é incidente.</p>
+
+<h3>3.2 <code>kong</code> — gateway e observabilidade</h3>
+
+<p>Stack em <code>~/kong-production/</code>. Amazon Linux. Disco 20 GB, 43% usado. SGs <code>kong-and-to-loadbalance</code> + <code>launch-wizard-2</code>.</p>
+
+<p>É a única EC2 que acumula dois papéis: gateway de API e stack de observabilidade (Prometheus + Loki + Grafana).</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>IP interno</th><th>Porta interna → host</th><th>Função</th></tr></thead>
+<tbody>
+<tr><td><code>kong</code></td><td><code>kong:3.9.1</code></td><td>172.30.0.60</td><td>8400→8400 proxy<br/>8401→8401 admin API<br/>8402→8402 admin GUI</td><td>Gateway</td></tr>
+<tr><td><code>kong-database</code></td><td><code>postgres:18-alpine</code></td><td>172.30.0.59</td><td>5432 <strong>não exposta</strong></td><td>Config store do Kong</td></tr>
+<tr><td><code>deck</code></td><td><code>kong/deck:v1.43.1</code></td><td>172.30.0.61</td><td>—</td><td>Dump/sync declarativo</td></tr>
+<tr><td><code>prometheus</code></td><td><code>prom/prometheus:v3.2.1</code></td><td>—</td><td>9090 interna</td><td>Métricas</td></tr>
+<tr><td><code>node-exporter</code></td><td><code>prom/node-exporter:v1.9.0</code></td><td>172.30.0.66</td><td>9100 interna</td><td>Métricas de host</td></tr>
+<tr><td><code>loki</code></td><td><code>grafana/loki:3.4</code></td><td>—</td><td>3100 interna</td><td>Logs</td></tr>
+<tr><td><code>promtail</code></td><td><code>grafana/promtail:3.4.0</code></td><td>—</td><td>—</td><td>Coletor de logs</td></tr>
+<tr><td><code>grafana</code></td><td><code>grafana/grafana:11.6.0</code></td><td>—</td><td><strong>3000→3000</strong></td><td>Dashboards</td></tr>
+</tbody>
+</table>
+
+<p>Variáveis relevantes do container <code>kong</code>:</p>
+
+<pre><code>KONG_DATABASE=postgres
+KONG_PG_HOST=kong-database
+KONG_PROXY_LISTEN=0.0.0.0:8400
+KONG_ADMIN_LISTEN=0.0.0.0:8401
+KONG_ADMIN_GUI_LISTEN=0.0.0.0:8402
+KONG_REAL_IP_HEADER=X-Forwarded-For
+KONG_REAL_IP_RECURSIVE=on
+KONG_TRUSTED_IPS=0.0.0.0/0,::/0</code></pre>
+
+<p><code>KONG_TRUSTED_IPS=0.0.0.0/0</code> combinado com <code>REAL_IP_HEADER=X-Forwarded-For</code> é o que faz o Kong enxergar o IP real do cliente em vez do IP do ALB — necessário para o <code>rate-limiting</code> contar por consumidor certo. O efeito colateral é que o Kong confia no <code>X-Forwarded-For</code> de qualquer origem; como a 8400 só aceita tráfego do SG do ALB, na prática só o ALB consegue injetar esse header.</p>
+
+<h4>Duas exposições que merecem revisão</h4>
+
+<ul>
+<li><strong>Grafana na 3000 aberto para <code>0.0.0.0/0</code></strong> (<code>launch-wizard-2</code>). A proteção é só o login do Grafana. Restringir aos mesmos IPs da 8401/8402 seria coerente com o resto.</li>
+<li><strong>Admin API na 8401 exposta na interface pública</strong>, restrita a 4 IPs. A Admin API do Kong OSS <strong>não tem autenticação</strong> — RBAC é recurso Enterprise. Quem alcança a 8401 tem controle total do gateway: criar rota, remover plugin de auth, ler credencial de consumer. O SG é a única trava, e ela é por IP.</li>
+</ul>
+
+<h3>3.3 <code>api-main</code> — API pública AdonisJS</h3>
+
+<p>Stack em <code>~/api_docker_stack/</code>. Amazon Linux. SGs <code>launch-wizard-3</code> + <code>ec2-rds-4</code>. Há um comando <code>deploy</code> no shell da máquina para atualizar e buildar a API.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>Porta</th><th>Env</th></tr></thead>
+<tbody>
+<tr><td><code>api</code></td><td><code>node:25-alpine3.21</code></td><td><code>3333:3333</code></td><td><code>DB_WRITE_*</code> → master<br/><code>DB_READ_REPLICA_*_1</code> → réplica</td></tr>
+</tbody>
+</table>
+
+<p><strong>Disco em 82% (8,1 GB de 10 GB).</strong> É o menor volume da frota e o mais cheio. Vale acompanhar — <code>node_modules</code> mais camadas de imagem antiga enchem rápido, e a 3333 é a única porta que o Kong tem para chamar.</p>
+
+<h3>3.4 <code>boomia</code> — API de IA</h3>
+
+<p>Stack em <code>~/boomia_docker_stack/</code>. Ubuntu 24.04. Disco 19 GB, 68% usado. SGs <code>launch-wizard-6</code> + <code>ec2-rds-4</code>. Única EC2 de aplicação em <strong>sa-east-1b</strong>.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>IP interno</th><th>Porta</th><th>Observação</th></tr></thead>
+<tbody>
+<tr><td><code>caddy</code></td><td>build local <code>Dockerfile.caddy</code></td><td>—</td><td><code>80:80</code>, <code>443:443</code></td><td>TLS próprio via DuckDNS</td></tr>
+<tr><td><code>boomia</code></td><td>build local <code>Dockerfiles/php8</code></td><td>172.30.0.32</td><td><code>expose 9000</code></td><td>php-fpm + supervisord</td></tr>
+<tr><td><code>redis</code></td><td><code>redis:alpine</code></td><td>172.30.0.40</td><td><code>6380:6379</code></td><td><code>--requirepass</code>, healthcheck</td></tr>
+<tr><td><code>duckdns</code></td><td><code>lscr.io/linuxserver/duckdns</code></td><td>—</td><td>—</td><td>Atualiza <code>boomia.duckdns.org</code></td></tr>
+</tbody>
+</table>
+
+<p>Esta é a única aplicação que o Kong alcança por <strong>HTTPS em hostname público</strong> (<code>https://boomia.duckdns.org:443</code>) em vez de IP privado. O caminho sai da VPC pelo IGW e volta. O SG compensa restringindo a 443 ao <code>/32</code> do Kong.</p>
+
+<p>O <code>redis</code> daqui aceita conexão da 6380 vinda de <code>sg-0e0e0589d6db182bf</code> — o SG do legado. Ou seja: <strong>o app ZF2 usa o Redis que roda na EC2 do boomia</strong>, não só o <code>redis-legado</code>.</p>
+
+<h3>3.5 <code>cron</code> — jobs agendados</h3>
+
+<p>Stack em <code>~/boom_docker_cron/</code>. Ubuntu 24.04. Disco 19 GB, 45% usado. SGs <code>launch-wizard-5</code> + <code>ec2-rds-4</code>.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>Porta</th><th>Volumes</th></tr></thead>
+<tbody>
+<tr><td><code>cronjobs</code></td><td><code>brunojoao3/boom_docker_cron:php8</code></td><td><code>8085:8080</code></td><td><code>Projects/boom_cron</code>, <code>php.ini</code>, <code>start.sh</code>, <code>supervisord.conf</code></td></tr>
+<tr><td><code>redis_cron</code></td><td><code>redis:alpine</code></td><td><code>6380:6379</code></td><td>—</td></tr>
+<tr><td><code>duckdns</code></td><td><code>lscr.io/linuxserver/duckdns</code></td><td>—</td><td>—</td></tr>
+</tbody>
+</table>
+
+<p>A porta 8085 é liberada para apenas 2 IPs fixos. <strong>O <code>supervisord.conf</code> montado aqui é o que mantém o Horizon vivo</strong> — a ausência dele foi a causa raiz do postmortem em <a href="/pt-br/sistemas/cron-horizon-followup-duplicado">Cron — Horizon parado e follow-up duplicado</a>. Note que a imagem é <code>boom_docker_cron:php8</code>, diferente da <code>boom_docker_stack:php8</code> usada no ambiente local.</p>
+
+<h3>3.6 <code>socket</code> — tempo real</h3>
+
+<p>Stack em <code>~/boom_stack_socket/</code>. Ubuntu 24.04. Disco 14 GB, 63% usado. SG <code>launch-wizard-7</code> — <strong>sem <code>ec2-rds-4</code></strong>: o socket não fala com banco.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>IP interno</th><th>Porta</th></tr></thead>
+<tbody>
+<tr><td><code>socket</code></td><td><code>node:25-alpine3.21</code></td><td>172.30.0.51</td><td>interna, atrás do Caddy</td></tr>
+<tr><td><code>caddy</code></td><td>build local <code>./caddy</code></td><td>172.30.0.52</td><td><code>80:80</code>, <code>443:443</code>, <code>443:443/udp</code></td></tr>
+<tr><td><code>duckdns</code></td><td><code>lscr.io/linuxserver/duckdns</code></td><td>—</td><td>—</td></tr>
+</tbody>
+</table>
+
+<p><strong><code>EMIT_SECRET</code> é o ponto crítico desta stack.</strong> O compose documenta o comportamento em comentário: o gate em <code>src/index.js</code> é <code>if (SECRET &amp;&amp; req.headers["x-secret"] !== SECRET)</code>. Com a variável <strong>vazia</strong>, o <code>if</code> nunca entra e o <code>POST /emit</code> fica aberto para qualquer um que alcance a porta. E o valor precisa ser idêntico ao <code>SOCKET_EMIT_SECRET</code> do <code>.env</code> da app <strong>nos dois hosts do legado</strong> — se divergir, todo emit vira 401 e <strong>o CRM para de atualizar em tempo real sem erro visível</strong>, porque o <code>SocketEmitter</code> engole a falha.</p>
+
+<h3>3.7 <code>papa-entulho</code> — banco de logs</h3>
+
+<p>Stack em <code>~/boom_docker_stack_papa_entulho/</code>. Ubuntu 24.04. Disco 29 GB, 40% usado. SG <code>launch-wizard-4</code>. Sem <code>ec2-rds-4</code> — tem MariaDB próprio, fora do RDS.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>Porta</th><th>Banco</th></tr></thead>
+<tbody>
+<tr><td><code>mariadb</code></td><td><code>mariadb:latest</code></td><td><code>3308:3306</code></td><td><code>papa_entulho_logs</code></td></tr>
+<tr><td><code>duckdns</code></td><td><code>lscr.io/linuxserver/duckdns</code></td><td>—</td><td>—</td></tr>
+</tbody>
+</table>
+
+<p>Guarda <code>logs_legacy*</code> (exceptions do app ZF2), <code>logs_boomia</code> (Gemini) e <code>cron_logs</code>. Acessado pelo hostname <code>boom-papa-entulho.duckdns.org:3308</code> — inclusive de dentro da AWS, porque quem consome não tem rota interna configurada para ele.</p>
+
+<p>Dois pontos: a imagem é <code>mariadb:latest</code> sem pin de versão — um <code>docker compose pull</code> pode trazer major nova sem aviso; e <strong>a porta 3308 está aberta para <code>0.0.0.0/0</code></strong>, o que faz sentido dado que os clientes chegam por hostname público, mas deixa o banco de logs exposto com autenticação como única barreira.</p>
+
+<h3>3.8 <code>redis-legado</code> — cache do app ZF2</h3>
+
+<p>Stack em <code>~/redis-boom/</code>. Ubuntu 24.04. Disco 8,7 GB, 66% usado. SG <code>redis-legado</code>.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>Porta</th><th>Uptime na coleta</th></tr></thead>
+<tbody>
+<tr><td><code>redis</code></td><td><code>redis:alpine</code></td><td><code>6378:6379</code></td><td>12 meses</td></tr>
+<tr><td><code>redis2</code></td><td><code>redis:alpine</code></td><td><code>6377:6379</code></td><td>11 meses</td></tr>
+</tbody>
+</table>
+
+<p>Duas instâncias na mesma máquina, em portas distintas, ambas liberadas só para o SG <code>ec2-rds-4</code>. É a única EC2 da frota cujo disco passa de 60% sem ter aplicação — vale checar o tamanho do dump/AOF se subir mais.</p>
+
+<h3>3.9 <code>centralizador</code> — motor de PDF e workers de automação</h3>
+
+<p>Ubuntu 26.04 LTS (a mais nova da frota). Disco 19 GB, 53% usado. RAM 1,9 GiB. SG <code>launch-wizard-8</code> (80, 443, 22). Não tem entrada no config do Terminator — o acesso é <code>ssh -i ~/keys/new-prod-sp.pem ubuntu@52.67.141.237</code>.</p>
+
+<h4>O nome engana: esta máquina não roda o Centralizador</h4>
+
+<p>O app Centralizador é CodeIgniter e vive em <strong>hospedagem cPanel</strong>, fora da AWS — é por isso que <code>centralizador.boomsistemas.com.br</code> resolve para <code>69.6.212.249</code> e não para o IP desta EC2. Aqui, <code>Projects/centralizador-boom</code> está <strong>vazio</strong> e o <code>readme.txt</code> registra que o projeto deveria ser clonado à mão. O container <code>php8</code> foi <strong>removido do compose em 05/08/2026</strong>.</p>
+
+<p>Consequência verificável: <code>GET https://boom-centralizador.duckdns.org/</code> devolve <strong>404</strong> — docroot vazio, sem PHP. O que esta máquina realmente entrega é o <strong>Gotenberg</strong> e dois workers sob demanda.</p>
+
+<p>O hostname de trabalho é <code>boom-centralizador.duckdns.org</code> (DuckDNS → <code>52.67.141.237</code>), com TLS Let's Encrypt emitido em 05/08/2026 e renovação automática a cada 12h.</p>
+
+<h4>Stack 1 — <code>~/boom_docker_stack_centralizador/</code></h4>
+
+<p>Rede <code>centralizador_network</code>, <strong><code>10.60.0.0/24</code></strong> — a única da frota que não usa <code>172.30.0.0/16</code>.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>IP interno</th><th>Porta</th><th>Função</th></tr></thead>
+<tbody>
+<tr><td><code>centralizador_nginx</code></td><td>build local <code>Dockerfiles/nginx</code></td><td>10.60.0.20</td><td><code>80:80</code>, <code>443:443</code></td><td>TLS + auth do Gotenberg</td></tr>
+<tr><td><code>centralizador_duckdns</code></td><td><code>lscr.io/linuxserver/duckdns</code></td><td>10.60.0.30</td><td>—</td><td>Mantém o hostname atualizado</td></tr>
+<tr><td><code>centralizador_certbot</code></td><td><code>certbot/certbot:latest</code></td><td>10.60.0.31</td><td>—</td><td>Loop <code>certbot renew</code> a cada 12h</td></tr>
+</tbody>
+</table>
+
+<h4>Stack 2 — <code>~/gotenberg/compose.yaml</code></h4>
+
+<p>Compose <strong>separado de propósito</strong>, entrando na rede da stack 1 como <code>external</code>. O container é <code>boom-gotenberg</code>, imagem própria <code>boom-gotenberg:8-fonts</code>. É o motor HTML→PDF (Chromium headless) do módulo novo de Documentos do <code>app.boomsistemas.com.br</code>.</p>
+
+<table>
+<thead><tr><th>Configuração</th><th>Valor</th><th>Motivo registrado no compose</th></tr></thead>
+<tbody>
+<tr><td>Bind da porta</td><td><strong><code>127.0.0.1:3000:3000</code></strong></td><td><code>docker publish</code> escreve direto no iptables; publicar em <code>0.0.0.0</code> exporia o serviço mesmo com o SG fechado — e o <strong>Gotenberg não tem autenticação</strong></td></tr>
+<tr><td><code>--chromium-disable-javascript</code></td><td>ativo</td><td>O HTML vem de conteúdo autoral do cliente</td></tr>
+<tr><td><code>--chromium-deny-private-ips</code></td><td>ativo</td><td>Rejeita URL que resolva para IP privado. Dentro de uma VPC isso é crítico: <code>169.254.169.254</code> é a metadata da EC2, com credencial de role</td></tr>
+<tr><td><code>--chromium-max-concurrency</code></td><td><code>2</code></td><td>2 vCPU divididos com a stack 1. O default do Gotenberg é 6</td></tr>
+<tr><td><code>--api-timeout</code></td><td><code>60s</code></td><td>—</td></tr>
+<tr><td><code>mem_limit</code> / <code>memswap_limit</code></td><td><code>1g</code> / <code>1g</code></td><td>Teto real, não folga: a máquina tem 1,9 GiB. Contém Chromium descontrolado sem derrubar o host</td></tr>
+<tr><td><code>healthcheck</code></td><td><code>curl /health</code> a cada 30s</td><td>Na coleta: <code>chromium</code> e <code>libreoffice</code> ambos <code>up</code></td></tr>
+</tbody>
+</table>
+
+<h4>Por que a imagem é própria</h4>
+
+<p>Paridade de fonte com o mPDF, o motor antigo. A medição de <strong>27/07/2026</strong> mostrou que a diferença de escala entre mPDF e Chromium era <strong>100% família de fonte</strong>: o mPDF resolve <code>sans-serif</code>/<code>serif</code> para <strong>DejaVu Condensed</strong>, e o Chromium usa o que estiver instalado no host — que não tinha fonte nenhuma, e a imagem oficial do Gotenberg também não traz DejaVu Condensed. O <code>Dockerfile</code> copia os <strong>mesmos <code>.ttf</code> que o mPDF empacota</strong> (<code>vendor/mpdf/mpdf/ttfonts</code>), garantindo métrica idêntica nos dois motores. Ver <a href="/pt-br/sistemas/contratos">Contratos</a>.</p>
+
+<h4>Como o app chega no Gotenberg</h4>
+
+<p>A porta 3000 nunca é publicada. Quem autentica é o nginx, no bloco <code>location /gotenberg/</code>:</p>
+
+<pre><code>location /gotenberg/ {
+    auth_basic           "Gotenberg";
+    auth_basic_user_file /etc/nginx/htpasswd;
+    proxy_pass http://boom-gotenberg:3000/;
+    client_max_body_size 32m;
+    proxy_read_timeout   120s;
+    proxy_send_timeout   120s;
+}</code></pre>
+
+<p>O app configura <code>DOCUMENTOS_PDF_CHROMIUM_URL=https://usuario:senha@boom-centralizador.duckdns.org/gotenberg</code>. Verificado na coleta: <code>/gotenberg/</code> devolve <strong>401</strong> com TLS válido.</p>
+
+<p>Três detalhes que quebram se alterados sem atenção:</p>
+
+<ul>
+<li><strong>O nome no <code>proxy_pass</code> é <code>boom-gotenberg</code>, não <code>gotenberg</code></strong> — são projetos Compose diferentes, e só o <code>container_name</code> atravessa entre eles.</li>
+<li><strong>A barra final do <code>proxy_pass</code> corta o prefixo</strong>, por isso a URL do app termina em <code>/gotenberg</code> sem barra.</li>
+<li><strong>Os limites de 32 MB e 120s são contrato, não folga.</strong> O corpo leva HTML mais imagens em data URI, e o render passa de 1s no cold start (~3s medido). Os defaults do nginx — 1 MB de corpo e 60s de leitura — cortariam os dois casos.</li>
+</ul>
+
+<h4>A armadilha do <code>fastcgi_pass</code></h4>
+
+<p>O bloco <code>location ~ \.php$</code> do nginx está <strong>comentado desde 05/08/2026</strong>, e o comentário explica por quê: com o container <code>php8</code> fora do compose, o <code>fastcgi_pass php8:8001</code> fazia o <strong>nginx falhar ao subir</strong> com <em>"host not found in upstream"</em>. Isso derrubaria o proxy do Gotenberg no próximo restart. <strong>Se o Centralizador um dia vier para esta máquina, é preciso descomentar o bloco E devolver o serviço <code>php8</code> ao compose — na ordem certa.</strong></p>
+
+<h4>Workers sob demanda (não são serviços)</h4>
+
+<table>
+<thead><tr><th>Diretório</th><th>O que é</th></tr></thead>
+<tbody>
+<tr><td><code>~/boom-email-migracao/</code></td><td>Runner de migração IMAP. Recebe job JSON no STDIN via SSH, decifra as senhas com <em>sealed box</em> (PyNaCl) usando a chave privada que <strong>só existe nesta máquina</strong> (<code>keys/migracao_priv.b64</code>, <code>0600</code>), e roda <code>imapsync</code> no container <code>boom-imapsync</code>. A senha em claro <strong>nunca vai para argv nem para o log</strong> — usa <code>--passfile</code> montado read-only. Disparado pelo <code>spark email:migrar</code> do Centralizador. Versionado em <code>deploy/email-migracao/runner.py</code> no repo do Centralizador. Requer <code>python3-nacl</code> via <code>apt</code>, não <code>pip</code></td></tr>
+<tr><td><code>~/boom-site-auditor/</code></td><td>Auditor de defesas dos sites de clientes, medindo de fora. Allowlist <strong>obrigatória</strong> vinda do Centralizador (<code>GET /api/v1/auditoria/alvos</code>) — domínio fora dela é recusado antes de qualquer requisição. <strong>Passivo por padrão</strong> (só <code>GET</code>, nunca submete formulário); <code>--ativo</code> é opt-in e marca todo campo com <code>[BOOM-AUDIT] &lt;nonce&gt;</code>. Resultado volta para <code>/painel/auditoria</code></td></tr>
+</tbody>
+</table>
+
+<p>Nenhum dos dois roda continuamente — não aparecem em <code>docker ps</code> fora de uma execução.</p>
+
+<h3>3.10 Ambiente local de desenvolvimento</h3>
+
+<p>Fora da AWS, mas é o que o time roda no dia a dia: <code>~/boom_docker_stack/docker-compose.yml</code>, rede <code>boom_network</code> <code>172.30.0.0/16</code> com IPs fixos por serviço. Reproduz a produção com diferenças importantes:</p>
+
+<table>
+<thead><tr><th>Serviço</th><th>Porta local</th><th>Diferença vs. produção</th></tr></thead>
+<tbody>
+<tr><td><code>nginx</code></td><td>7000, 7100, 8000, 7002</td><td>Bridge com IP fixo, não <code>network_mode: host</code>. A 7002 é o worktree da vez</td></tr>
+<tr><td><code>php7</code> / <code>php8</code></td><td>7001 / 8001 (expose)</td><td>Sem New Relic</td></tr>
+<tr><td><code>mariadb</code> / <code>mariadb11</code></td><td>3306 / 3367</td><td>Banco local, não RDS</td></tr>
+<tr><td><code>kong</code> + <code>kong-database</code> + <code>deck</code></td><td>8400–8402, 8443, 5432</td><td>Postgres exposto na 5432 (em produção não é)</td></tr>
+<tr><td><code>api</code></td><td>3333</td><td><code>node ace serve --watch</code></td></tr>
+<tr><td><code>socket</code></td><td>3111</td><td><code>EMIT_SECRET=111</code> fixo</td></tr>
+<tr><td><code>boomia</code> / <code>cronjobs</code></td><td>8086 / 8085</td><td>—</td></tr>
+<tr><td><code>redis</code></td><td>6379</td><td>Em produção são 6377/6378/6380</td></tr>
+<tr><td><code>dbgate</code></td><td>7777</td><td>7 conexões pré-configuradas</td></tr>
+<tr><td><code>wikijs</code></td><td>7778</td><td>Esta wiki</td></tr>
+<tr><td><code>n8n</code>, <code>qdrant</code>, <code>portainer</code>, <code>heimdall</code>, <code>mailhog</code></td><td>5678, 6333/6334, 9001, 80, 1025/9003</td><td>Só local</td></tr>
+</tbody>
+</table>
+
+<p>O DBGate local (<code>:7777</code>) é o mapa mais direto de qual endpoint é o quê, e as cores das conexões são a convenção de risco do time:</p>
+
+<table>
+<thead><tr><th>Conexão</th><th>Label</th><th>Aponta para</th><th>Cor</th></tr></thead>
+<tbody>
+<tr><td><code>con1</code></td><td>1-LOCAL</td><td><code>mariadb</code> local</td><td>verde</td></tr>
+<tr><td><code>con2</code></td><td>2-STAGING</td><td>banco de staging</td><td>ciano</td></tr>
+<tr><td><code>con3</code></td><td>9-PRODUCTION (update/insert/delete)</td><td><strong>RDS master</strong></td><td><strong>vermelho</strong></td></tr>
+<tr><td><code>con4</code></td><td>4-PRODUCTION_REPLICA_1 (readonly-api)</td><td><code>boomsistemas-replica-1</code></td><td>laranja</td></tr>
+<tr><td><code>con5</code></td><td>5-PRODUCTION_REPLICA_2</td><td><code>boomsistemas-replica-2</code></td><td>laranja</td></tr>
+<tr><td><code>con6</code></td><td>6-PRODUCTION_DEV_AND_DUMPS (readonly-free)</td><td><code>boomsistemas-replica-for-dev</code></td><td>amarelo</td></tr>
+<tr><td><code>con7</code></td><td>7-PAPA_ENTULHO_LOGS</td><td><code>papa-entulho:3308</code></td><td>roxo</td></tr>
+</tbody>
+</table>
+
+<p>Vermelho é o master e aceita escrita. <strong>Trabalho de investigação usa <code>con6</code></strong>, que é a réplica reservada para dev e dumps.</p>
+<h2>4. Kong API Gateway</h2>
+
+<p>Kong <strong>3.9.1</strong> OSS, backend Postgres, rodando na EC2 <code>kong</code>. Configuração extraída da Admin API de produção (<code>:8401</code>) na data da coleta.</p>
+
+<h3>4.1 Upstreams e targets — não existem</h3>
+
+<p>Resposta direta, porque é a primeira coisa que se procura: <strong>o Kong de produção tem zero upstreams e zero targets.</strong></p>
+
+<pre><code>GET /upstreams  → {"data": []}
+GET /targets    → nenhum
+GET /certificates → {"data": []}
+GET /snis       → {"data": []}</code></pre>
+
+<p>Os <em>services</em> apontam <strong>direto para host e porta</strong>, sem camada de balanceamento do Kong. Isso significa que:</p>
+
+<ul>
+<li><strong>Não há load balancing nem health check ativo de upstream.</strong> Se o <code>api-main</code> cair, o Kong continua encaminhando para ele e devolvendo erro — não existe alvo alternativo para onde desviar. A resiliência hoje é o <code>retries: 5</code> de cada service, nada além disso.</li>
+<li><strong>O service <code>api-loja</code> aponta para o IP público do <code>api-main</code></strong> (<code>52.67.152.88</code>). É um <strong>Elastic IP</strong>, então sobrevive a stop/start e pode ser reassociado a uma instância nova — o endereço não é volátil. O incômodo real é outro: o tráfego Kong→API sai pelo IGW e volta, em vez de usar o IP privado <code>172.31.15.71</code>.</li>
+<li><strong>TLS não termina no Kong.</strong> Sem certificado e sem SNI cadastrados: o ALB <code>kong-elb</code> termina o HTTPS com certificado ACM e fala HTTP puro na 8400.</li>
+</ul>
+
+<p>Migrar os services para upstream com dois targets é o caminho natural quando houver uma segunda instância da API — e é pré-requisito para qualquer deploy sem downtime.</p>
+
+<h3>4.2 Services</h3>
+
+<table>
+<thead><tr><th>Service</th><th>Destino</th><th>Retries</th><th>Timeouts c/r/w</th></tr></thead>
+<tbody>
+<tr><td><code>api-loja</code></td><td><code>http://52.67.152.88:3333</code></td><td>5</td><td>10s / 10s / 10s</td></tr>
+<tr><td><code>docs</code></td><td><code>http://52.67.152.88:3333/v1/docs</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
+<tr><td><code>swagger</code></td><td><code>http://52.67.152.88:3333/v1/swagger</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
+<tr><td><code>boomia</code></td><td><code>https://boomia.duckdns.org:443</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
+</tbody>
+</table>
+
+<p>O <code>api-loja</code> tem timeout de <strong>10s</strong> contra 60s dos demais — é a rota de negócio e falha rápido de propósito. O <code>boomia</code> em 60s acomoda a latência do Gemini.</p>
+
+<h3>4.3 Routes</h3>
+
+<table>
+<thead><tr><th>Route</th><th>Path</th><th><code>strip_path</code></th><th>Service</th></tr></thead>
+<tbody>
+<tr><td><code>v1_loja</code></td><td><code>/v1/loja</code></td><td><strong>false</strong></td><td><code>api-loja</code></td></tr>
+<tr><td><code>v1_loja_config</code></td><td><code>~/v1/loja/\d+/crm/config</code> (regex)</td><td><strong>false</strong></td><td><code>api-loja</code></td></tr>
+<tr><td><code>v1_loja_financeiro</code></td><td><code>~/v1/loja/\d+/financeiro/.*</code> (regex)</td><td><strong>false</strong></td><td><code>api-loja</code></td></tr>
+<tr><td><code>boomia</code></td><td><code>/boomia</code></td><td>true</td><td><code>boomia</code></td></tr>
+<tr><td><code>v1_docs</code></td><td><code>/v1/docs</code></td><td>true</td><td><code>docs</code></td></tr>
+<tr><td><code>v1_swagger</code></td><td><code>/v1/swagger</code></td><td>true</td><td><code>swagger</code></td></tr>
+<tr><td><code>health</code></td><td><code>/health</code></td><td>true</td><td>— (terminada no Kong)</td></tr>
+<tr><td><code>root</code></td><td><code>/</code></td><td>true</td><td>— (redirect 301)</td></tr>
+</tbody>
+</table>
+
+<p>Nenhuma route filtra por <code>hosts</code> ou por <code>methods</code> — o roteamento é puramente por path. Como só existe um hostname de entrada (<code>api.boomsistemas.com.br</code>), isso funciona, mas significa que <strong>qualquer hostname que resolva para o ALB <code>kong-elb</code> casa nas mesmas rotas</strong>.</p>
+
+<p>As três rotas <code>v1_loja*</code> usam <code>strip_path: false</code>: o path completo é repassado ao AdonisJS, que faz o roteamento fino. As duas regex existem para <strong>aplicar ACL diferente no mesmo service</strong> — é o mecanismo de autorização por área, detalhado abaixo.</p>
+
+<h3>4.4 Plugins ativos</h3>
+
+<h4>Globais</h4>
+
+<table>
+<thead><tr><th>Plugin</th><th>Configuração</th><th>Estado</th></tr></thead>
+<tbody>
+<tr><td><code>rate-limiting</code></td><td>10/s, 60/min, 3600/h · <code>policy: local</code> · <code>limit_by: consumer</code> · HTTP 429 <em>"API rate limit exceeded"</em></td><td>ativo</td></tr>
+<tr><td><code>cors</code></td><td><code>GET, HEAD, PUT, PATCH, POST, DELETE, OPTIONS, TRACE, CONNECT</code> · origins não restrito</td><td>ativo</td></tr>
+<tr><td><code>prometheus</code></td><td><code>latency</code>, <code>bandwidth</code>, <code>status_code</code>, <code>per_consumer</code>, <code>upstream_health</code>, <code>ai_metrics</code></td><td>ativo</td></tr>
+<tr><td><code>bot-detection</code></td><td>listas <code>allow</code>/<code>deny</code> vazias</td><td><strong>desabilitado</strong></td></tr>
+</tbody>
+</table>
+
+<h4>Por service e por route</h4>
+
+<table>
+<thead><tr><th>Escopo</th><th>Plugin</th><th>O que faz</th></tr></thead>
+<tbody>
+<tr><td><code>api-loja</code></td><td><code>oauth2</code></td><td><code>client_credentials</code> + <code>authorization_code</code> · token 7200s · refresh 1209600s (14d) · <code>pkce: lax</code> · <code>global_credentials</code> · <code>hide_credentials</code> · <code>accept_http_if_already_terminated</code></td></tr>
+<tr><td><code>api-loja</code></td><td><code>acl</code> ×2</td><td>Um permite grupo <code>financeiro</code>, outro permite <code>filial_crm_config</code>. Ambos com <code>always_use_authenticated_groups</code></td></tr>
+<tr><td><code>api-loja</code></td><td><code>post-function</code></td><td>Lua no <code>access</code>: se o consumer for <code>cnpj-restrict-request-users</code>, valida o CNPJ do path contra o nome da credencial</td></tr>
+<tr><td><code>boomia</code></td><td><code>basic-auth</code></td><td><code>realm: service</code></td></tr>
+<tr><td><code>boomia</code></td><td><code>rate-limiting</code></td><td>15/s · limites de minuto/hora/mês praticamente abertos (999999+)</td></tr>
+<tr><td>route <code>health</code></td><td><code>request-termination</code></td><td>HTTP 200 <code>ok</code> sem tocar em backend — é o alvo do health check do ALB</td></tr>
+<tr><td>route <code>root</code></td><td><code>redirect</code></td><td>301 → <code>https://api.boomsistemas.com.br/v1/docs</code></td></tr>
+</tbody>
+</table>
+
+<p>Notas de comportamento:</p>
+
+<ul>
+<li><strong><code>accept_http_if_already_terminated: true</code> no oauth2 é obrigatório aqui.</strong> O TLS termina no ALB e o Kong recebe HTTP puro; sem essa flag o plugin recusaria o fluxo OAuth por não estar em HTTPS.</li>
+<li><strong><code>policy: local</code> no rate-limiting.</strong> O contador vive na memória do nó Kong. Com uma instância isso é exato — quando houver a segunda, o limite efetivo passa a ser o dobro do configurado, porque cada nó conta o seu. A migração é apontar o plugin para Redis.</li>
+<li><strong>O rate limit do <code>boomia</code> é permissivo por desenho</strong> (15/s com teto de hora praticamente aberto): tráfego interno do CRM, não parceiro externo.</li>
+<li><strong>O <code>bot-detection</code> está cadastrado mas desabilitado.</strong> Não protege nada hoje; está lá como esqueleto.</li>
+<li><strong>Sem <code>request-transformer</code>, sem <code>http-log</code> e sem <code>file-log</code>.</strong> Não há transformação de header nem log de acesso via plugin — o log do Kong é o do container, coletado pelo Promtail para o Loki.</li>
+</ul>
+
+<h3>4.5 Consumers e o modelo de autorização</h3>
+
+<table>
+<thead><tr><th>Consumer</th><th>Papel</th></tr></thead>
+<tbody>
+<tr><td><code>systems</code></td><td>Integrações internas</td></tr>
+<tr><td><code>admins</code></td><td>Acesso administrativo</td></tr>
+<tr><td><code>carchat-users</code></td><td>Integração CarChat — ver <a href="/pt-br/crm/carchat">CarChat</a></td></tr>
+<tr><td><code>cnpj-restrict-request-users</code></td><td>Parceiros com escopo travado por CNPJ</td></tr>
+</tbody>
+</table>
+
+<p>A autorização acontece em três camadas empilhadas sobre o mesmo service <code>api-loja</code>:</p>
+
+<ol>
+<li><strong><code>oauth2</code> autentica</strong> e resolve qual consumer está chamando.</li>
+<li><strong><code>acl</code> autoriza por área.</strong> Como o plugin está no service e as rotas de área têm regex própria, o efeito é que <code>/v1/loja/{id}/financeiro/*</code> e <code>/v1/loja/{id}/crm/config</code> exigem que o consumer pertença ao grupo correspondente.</li>
+<li><strong><code>post-function</code> restringe por identidade.</strong> Para o consumer <code>cnpj-restrict-request-users</code>, um script Lua compara o CNPJ presente no path com o nome da credencial usada — impede que um parceiro autenticado leia dados de outra loja apenas trocando o ID na URL. É a única regra de <em>tenant isolation</em> que roda no gateway; os demais consumers não passam por ela.</li>
+</ol>
+
+<blockquote>
+<p>O <code>provision_key</code> do plugin oauth2 é segredo do gateway e <strong>não está reproduzido nesta página</strong> — consultar direto na Admin API quando necessário.</p>
+</blockquote>
+
+<h3>4.6 Fluxo de uma requisição</h3>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+sequenceDiagram
+  autonumber
+  participant C as Cliente / Parceiro
+  participant D as Route53
+  participant A as ALB kong-elb
+  participant K as Kong 3.9.1
+  participant P as Plugins
+  participant S as api-main AdonisJS 3333
+  participant W as RDS master
+  participant R as RDS replica-1
+
+  C->>D: resolve api.boomsistemas.com.br
+  D-->>C: alias do ALB kong-elb
+  C->>A: HTTPS 443 GET /v1/loja/123/financeiro/titulos
+  Note over A: TLS termina aqui - certificado ACM
+  A->>K: HTTP 8400 + X-Forwarded-For
+  K->>P: cors
+  K->>P: rate-limiting global 10/s por consumer
+  K->>P: oauth2 valida Bearer e resolve consumer
+  P-->>K: consumer autenticado
+  K->>P: acl exige grupo financeiro
+  K->>P: post-function valida CNPJ do path
+  alt Autorizado
+    K->>S: HTTP 3333 path completo - strip_path false
+    S->>W: INSERT / UPDATE
+    S->>R: SELECT
+    R-->>S: resultado
+    S-->>K: 200 JSON
+    K-->>A: 200
+    A-->>C: 200
+  else Falha de auth ou limite
+    K-->>C: 401 - 403 - 429
+  end
+</code></pre>
+</div>
+
+<h3>4.7 Kong local vs. produção — o <code>kong.yaml</code> está defasado</h3>
+
+<p>Existe um arquivo declarativo versionado em <code>~/boom_docker_stack/FilesConfigs/Kong/deck/kong.yaml</code>, aplicado com o container <code>deck</code> (atalhos <em>KONG EXPORT / SYNC / DIFF</em> no Terminator). <strong>Ele não representa a produção.</strong> Comparando os três estados:</p>
+
+<table>
+<thead><tr><th>Item</th><th><code>kong.yaml</code> no repo</th><th>Kong local</th><th>Kong produção</th></tr></thead>
+<tbody>
+<tr><td>Service <code>boomia</code></td><td>ausente</td><td>ausente</td><td><strong>existe</strong></td></tr>
+<tr><td>Routes <code>v1_loja_config</code> / <code>v1_loja_financeiro</code></td><td>ausentes</td><td>ausentes</td><td><strong>existem</strong></td></tr>
+<tr><td>Plugins <code>acl</code></td><td>ausentes</td><td>ausentes</td><td><strong>2 ativos</strong></td></tr>
+<tr><td>Plugin <code>post-function</code> (CNPJ)</td><td>ausente</td><td>ausente</td><td><strong>ativo</strong></td></tr>
+<tr><td>Plugin <code>prometheus</code></td><td>ausente</td><td>ausente</td><td><strong>ativo</strong></td></tr>
+<tr><td>Nome do service da loja</td><td><code>api-loja</code></td><td><code>api-lojas</code></td><td><code>api-loja</code></td></tr>
+<tr><td>Route da loja</td><td><code>v1_loja</code></td><td><code>v1_carchat</code></td><td><code>v1_loja</code></td></tr>
+<tr><td>Consumers</td><td><code>boom-api</code> (credenciais <code>dev</code>)</td><td><code>carchat</code>, <code>boom</code></td><td>4 consumers reais</td></tr>
+<tr><td><code>bot-detection</code></td><td>habilitado</td><td>habilitado</td><td>desabilitado</td></tr>
+<tr><td>Rate limit global</td><td>8/s, 7200/h</td><td>8/s, 7200/h</td><td>10/s, 60/min, 3600/h</td></tr>
+</tbody>
+</table>
+
+<p><strong>Risco concreto:</strong> rodar <code>deck gateway sync</code> desse arquivo contra a produção <strong>removeria</strong> o service <code>boomia</code>, as duas rotas de área, os dois ACLs, o <code>post-function</code> de CNPJ e os quatro consumers reais — derrubando a integração da IA e abrindo o isolamento por CNPJ de uma vez só. O <code>sync</code> é declarativo: o que não está no arquivo é apagado.</p>
+
+<p>Enquanto o arquivo não for regerado a partir da produção, <strong>usar apenas <code>deck gateway diff</code>, nunca <code>sync</code>, apontando para produção.</strong> Para atualizar o arquivo, o caminho é <code>deck gateway dump</code> a partir do Kong de produção e commitar o resultado.</p>
+<h2>5. Cache, filas e comunicação interna</h2>
+
+<h3>5.1 As três instâncias de Redis</h3>
+
+<p>Não existe um Redis central. São <strong>quatro processos em três EC2</strong>, cada um servindo a sua stack, sem replicação nem cluster entre eles:</p>
+
+<table>
+<thead><tr><th>Onde</th><th>Container</th><th>Porta host</th><th>Quem acessa</th><th>Uso</th></tr></thead>
+<tbody>
+<tr><td><code>redis-legado</code></td><td><code>redis</code></td><td><code>6378</code></td><td>SG <code>ec2-rds-4</code></td><td>Cache do app ZF2 (<code>REDIS_HOST</code>/<code>PORT</code>/<code>AUTH</code>/<code>DB</code>)</td></tr>
+<tr><td><code>redis-legado</code></td><td><code>redis2</code></td><td><code>6377</code></td><td>SG <code>ec2-rds-4</code></td><td>Segunda base do legado</td></tr>
+<tr><td><code>boomia</code></td><td><code>redis</code></td><td><code>6380</code></td><td>SG <code>launch-wizard-1</code> (legado)</td><td>Cache do Laravel da IA — <strong>e alcançável pelo legado</strong></td></tr>
+<tr><td><code>cron</code></td><td><code>redis_cron</code></td><td><code>6380</code></td><td>local à instância</td><td><strong>Filas do Horizon</strong></td></tr>
+</tbody>
+</table>
+
+<p>Dois pontos que costumam confundir:</p>
+
+<ul>
+<li><strong>O Redis do <code>boomia</code> e o do <code>cron</code> usam a mesma porta host, 6380</strong>, em máquinas diferentes. Ao ler um <code>.env</code>, o que distingue é o host, não a porta.</li>
+<li><strong>A fila do Horizon vive no <code>redis_cron</code>, isolada na EC2 <code>cron</code>.</strong> Nenhuma outra máquina alcança essa porta. É por isso que job enfileirado por outro serviço não aparece no Horizon — e por que o <code>supervisord</code> daquele container é o único responsável por manter o worker vivo.</li>
+</ul>
+
+<h3>5.2 Como os projetos falam entre si</h3>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph LR
+  subgraph EDGE["Borda"]
+    ALB1["ALB spboomsistemas"]
+    ALB2["ALB kong-elb<br/>api.boomsistemas.com.br"]
+  end
+
+  ALB1 --> APP["app ZF2 - PHP 7<br/>legado-main + slave<br/>nginx 80 + fpm 7001"]
+  ALB2 --> KONG["Kong 3.9.1<br/>EC2 kong"]
+
+  KONG -->|"/v1/loja - /v1/docs - /v1/swagger"| API["api.boomsistemas.com.br<br/>AdonisJS - porta 3333"]
+  KONG -->|"/boomia - basic-auth"| BIA["boomia<br/>Laravel - Gemini"]
+
+  APP -->|"HTTP interno"| BIA
+  APP -->|"POST /emit - header x-secret"| SOCK["socket<br/>socket.io atras do Caddy"]
+  APP -->|"6378 - 6377"| RL["redis-legado"]
+  APP -->|"6380"| RB["redis do boomia"]
+
+  SOCK -->|"websocket"| BROWSER["Navegador do usuario<br/>CRM em tempo real"]
+
+  CRON["boom_cron<br/>Laravel + Horizon"] -->|"filas"| RC["redis_cron 6380"]
+  CRON -->|"chama"| BIA
+
+  APP -->|"logs_legacy"| PAPA["papa-entulho<br/>MariaDB 3308"]
+  BIA -->|"logs_boomia"| PAPA
+  CRON -->|"cron_logs"| PAPA
+
+  APP --> RDS["RDS MariaDB<br/>master + 3 replicas"]
+  API --> RDS
+  BIA --> RDS
+  CRON --> RDS
+</code></pre>
+</div>
+
+<h4>Configuração de banco por projeto</h4>
+
+<table>
+<thead><tr><th>Projeto</th><th>Stack</th><th>Mecanismo de read/write split</th></tr></thead>
+<tbody>
+<tr><td><code>app.boomsistemas.com.br</code></td><td>ZF2 / PHP 7</td><td>Dois service managers: <code>zend_db_adapter</code> (master, <code>RDS_HOSTNAME_PRODUCTION</code>) e <code>zend_db_adapter_replica</code>, que lê <code>RDS_HOSTNAME_REPLICA_1..3</code>, faz <code>shuffle()</code> e tenta cada uma com <code>connect_timeout=3</code></td></tr>
+<tr><td><code>boomia</code></td><td>Laravel 12</td><td>Conexão <code>mariadb</code> com <code>read.host = [DB_READ_HOST_1, DB_READ_HOST_2]</code> e <code>write.host = DB_HOST</code>. Sem read hosts definidos, cai para conexão única</td></tr>
+<tr><td><code>api.boomsistemas.com.br</code></td><td>AdonisJS / Lucid</td><td><code>replicas.write</code> = <code>DB_WRITE_HOST</code>, <code>replicas.read</code> = <code>[DB_READ_REPLICA_HOST_1]</code></td></tr>
+<tr><td><code>boom_cron</code></td><td>Laravel</td><td><code>DB_*</code> para o RDS e <code>LOG_DB_*</code> para o papa-entulho</td></tr>
+</tbody>
+</table>
+
+<p>O padrão do ZF2 merece destaque porque é o único com <strong>fallback explícito</strong>: se nenhuma réplica responder em 3 segundos, ele registra <code>db_replica / connection_failed</code> e devolve o adapter do master. Leitura nunca falha por réplica indisponível — ela silenciosamente vira carga no master. Se o master começar a sofrer sem causa aparente, <strong>procurar por esse log antes de olhar query</strong>.</p>
+
+<p>Os três projetos Laravel/Adonis não têm esse fallback: réplica fora do ar vira erro de conexão.</p>
+
+<h4>A integração com o socket</h4>
+
+<p>O app ZF2 publica evento no socket via <code>POST /emit</code> com header <code>x-secret</code>, usando <code>SOCKET_URL_BACKEND</code> (hostname interno, resolvido pelo <code>extra_hosts</code> para <code>172.31.15.51</code>) e <code>SOCKET_URL_FRONT</code> para o navegador. O segredo é o <code>SOCKET_EMIT_SECRET</code>, que precisa bater com o <code>EMIT_SECRET</code> do container do socket. Falha aqui é silenciosa — ver 3.6.</p>
+
+<h2>6. Automação e armazenamento</h2>
+
+<h3>6.1 Lambdas de ligar/desligar</h3>
+
+<table>
+<thead><tr><th>Função</th><th>Runtime</th><th>Memória</th><th>Timeout</th><th>Última modificação</th></tr></thead>
+<tbody>
+<tr><td><code>LigarSlaves</code></td><td>python3.13</td><td>150 MB</td><td>50s</td><td>15/06/2026</td></tr>
+<tr><td><code>DesligarSlaves</code></td><td>python3.13</td><td>150 MB</td><td>360s</td><td>30/08/2025</td></tr>
+</tbody>
+</table>
+
+<p>Controlam a janela <strong>08–20h, segunda a sexta</strong>, da instância <code>boomsistemas-legado-slave</code>. Fora dela a instância fica <code>stopped</code>: SSH dá timeout e o ALB opera com um alvo só. O <code>DesligarSlaves</code> tem timeout 7× maior — desligamento gracioso demora mais que o boot.</p>
+
+<h3>6.2 Buckets S3</h3>
+
+<table>
+<thead><tr><th>Bucket</th><th>Uso</th></tr></thead>
+<tbody>
+<tr><td><code>arquivos.boomsistemas.com.br</code></td><td>Origem do CloudFront <code>arquivos.</code> — está em <code>us-west-1</code></td></tr>
+<tr><td><code>boom-cdn</code></td><td>Assets estáticos</td></tr>
+<tr><td><code>boomprivado</code></td><td>Arquivos privados</td></tr>
+<tr><td><code>boomsistemas-rds</code></td><td>Dumps e exports de banco</td></tr>
+<tr><td><code>boomsistemas-staging</code></td><td>Ambiente de staging</td></tr>
+<tr><td><code>boom-wikijs</code></td><td>Uploads desta wiki</td></tr>
+<tr><td><code>boom-centralizador</code>, <code>boom-metas</code></td><td>Módulos específicos</td></tr>
+<tr><td><code>elasticbeanstalk-us-west-1-...</code></td><td>Artefatos do Beanstalk (<code>homolog</code>)</td></tr>
+</tbody>
+</table>
+
+<h2>7. Resumo dos pontos de atenção</h2>
+
+<p>Consolidado do que apareceu ao longo do levantamento. Nada aqui é incidente aberto — é o inventário de dívida e de armadilha operacional, ordenado por impacto se der errado.</p>
+
+<table>
+<thead><tr><th>#</th><th>Ponto</th><th>Onde</th><th>Impacto se ignorado</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>deck gateway sync</code> com o <code>kong.yaml</code> versionado apaga metade da config de produção</td><td>4.7</td><td>Derruba integração da IA e remove isolamento por CNPJ</td></tr>
+<tr><td>2</td><td>Admin API do Kong (8401) sem autenticação, exposta em IP público com trava só por SG</td><td>3.2</td><td>Controle total do gateway para quem estiver na lista de IPs</td></tr>
+<tr><td>3</td><td>RDS com <code>PubliclyAccessible = true</code> e 3306 aberta a 7 IPs públicos</td><td>2.1</td><td>Superfície do banco é a internet; sem criptografia em repouso</td></tr>
+<tr><td>4</td><td>Backup do master com retenção de 2 dias</td><td>2</td><td>Erro de sexta descoberto na segunda não é recuperável</td></tr>
+<tr><td>5</td><td>Zero upstreams no Kong — sem failover nem health check de upstream</td><td>4.1</td><td>Se o <code>api-main</code> cair, o Kong segue mandando para ele. O IP no service é Elastic IP, então sobrevive a stop/start</td></tr>
+<tr><td>6</td><td>Master sem Multi-AZ</td><td>2</td><td>Falha de AZ derruba escrita até restore manual</td></tr>
+<tr><td>7</td><td>Porta 22 aberta para <code>0.0.0.0/0</code> em 7 security groups</td><td>1.5</td><td>Superfície de brute force em toda a frota</td></tr>
+<tr><td>8</td><td>Grafana na 3000 aberto para <code>0.0.0.0/0</code></td><td>3.2</td><td>Métricas e logs internos expostos atrás de um login</td></tr>
+<tr><td>9</td><td>Disco do <code>api-main</code> em 82% de 10 GB</td><td>3.3</td><td>Menor volume da frota, servindo a API pública</td></tr>
+<tr><td>10</td><td>Porta 3308 do papa-entulho aberta para <code>0.0.0.0/0</code>, imagem <code>mariadb:latest</code> sem pin</td><td>3.7</td><td>Banco de logs exposto; <code>pull</code> pode trazer major nova</td></tr>
+<tr><td>11</td><td><code>EMIT_SECRET</code> divergente ou vazio entre socket e os dois hosts do legado</td><td>3.6</td><td>Falha silenciosa: CRM para de atualizar em tempo real sem erro</td></tr>
+<tr><td>12</td><td><code>extra_hosts</code> do socket fixa <code>172.31.15.51</code> nos dois hosts do legado</td><td>3.1</td><td>Recriar a EC2 do socket quebra o tempo real até edição manual</td></tr>
+<tr><td>13</td><td>CloudFront <code>E39OTPH5MEJYG3</code> com alias do apex mas fora do caminho do tráfego</td><td>1.3</td><td>Custo e confusão de diagnóstico</td></tr>
+<tr><td>14</td><td>Policy TLS <code>ELBSecurityPolicy-2016-08</code> no <code>spboomsistemas</code> aceita TLS 1.0/1.1</td><td>1.4</td><td>Protocolo obsoleto no ALB do app principal</td></tr>
+<tr><td>15</td><td><code>rate-limiting</code> com <code>policy: local</code></td><td>4.4</td><td>Limite vira o dobro do configurado quando houver 2 nós Kong</td></tr>
+<tr><td>16</td><td>Endpoint <code>/gotenberg/</code> exposto na internet, protegido só por basic auth</td><td>3.9</td><td>Motor de PDF sem auth própria atrás de uma senha; rotacionar o <code>htpasswd</code> periodicamente</td></tr>
+<tr><td>17</td><td>EC2 <code>centralizador</code> não roda o Centralizador; docroot vazio devolve 404</td><td>3.9</td><td>Nome enganoso: quem procurar o app nesta máquina não encontra. O app está em cPanel</td></tr>
+<tr><td>18</td><td>Reativar PHP no <code>centralizador</code> sem devolver o serviço <code>php8</code> ao compose</td><td>3.9</td><td><code>host not found in upstream</code> impede o nginx de subir e derruba o proxy do Gotenberg</td></tr>
+</tbody>
+</table>
+
+<h2>Como este mapa foi levantado</h2>
+
+<p>Para refazer a coleta quando a infra mudar:</p>
+
+<ul>
+<li><strong>AWS:</strong> <code>export AWS_PROFILE=claude-ro</code> e os <code>describe-*</code>/<code>list-*</code> de <code>ec2</code>, <code>rds</code>, <code>elbv2</code>, <code>route53</code>, <code>lambda</code>, <code>s3</code>, <code>cloudfront</code>. O profile é somente leitura por IAM e por hook local.</li>
+<li><strong>Kong:</strong> <code>GET</code> em <code>/services</code>, <code>/routes</code>, <code>/plugins</code>, <code>/upstreams</code>, <code>/consumers</code>, <code>/certificates</code>, <code>/snis</code> na Admin API — só funciona a partir de um dos 4 IPs liberados no <code>launch-wizard-2</code>.</li>
+<li><strong>EC2:</strong> SSH com a key <code>new-prod-sp</code> (hosts no config do Terminator) e <code>docker ps</code> + leitura do <code>docker-compose.yml</code> de cada stack.</li>
+</ul>
+
+<p>Valores de senha, token e <code>provision_key</code> foram deliberadamente omitidos desta página.</p>

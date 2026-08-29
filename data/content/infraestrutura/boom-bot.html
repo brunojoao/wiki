@@ -1,0 +1,506 @@
+<!--
+title: boom-bot
+description: Automacao Trello -> Issue + branch + release do gitflow: duas fases (uma produz, outra julga), clone paralelo na porta 7003 para revisar na tela, e o finish sempre humano.
+published: 1
+date: 2026-08-29T18:15:53.065Z
+tags: agente, automacao, claude, gitflow, github, infraestrutura, release, trello
+editor: ckeditor
+dateCreated: 2026-08-28T14:49:11.653Z
+-->
+
+<h1>boom-bot</h1>
+
+<p>Automação que transforma cartão do Trello em <strong>Issue + branch</strong> no GitHub e depois junta as branches aprovadas numa <strong>release do gitflow</strong>. Nada chega à <code>master</code> sem revisão humana. Roda na estação de trabalho do dev, por comando manual, e usa o Claude Code em modo headless (<code>claude -p</code>) para triar e corrigir.</p>
+
+<p>São <strong>duas fases</strong>, dois comandos, dois scripts:</p>
+
+<table>
+<thead><tr><th>Fase</th><th>Comando</th><th>Script</th><th>O que entrega</th></tr></thead>
+<tbody>
+<tr><td><strong>1 — produz</strong></td><td><code>/me_boom_bot_fix</code></td><td><code>run.py</code></td><td>cartão do Trello vira Issue + branch <code>bugfix/</code></td></tr>
+<tr><td><strong>2 — julga</strong></td><td><code>/me_boom_bot_release</code></td><td><code>release.py</code></td><td>revisa as branches e monta a <code>release/</code></td></tr>
+</tbody>
+</table>
+
+<p>O corte entre as duas é deliberado: <strong>a fase 1 nunca julga o próprio trabalho, e a fase 2 nunca escreve código.</strong> Nenhuma das duas escreve em <code>master</code> — quem roda o <code>git flow release finish</code> é o dev, à mão.</p>
+
+<blockquote>
+<p>Hoje é ferramenta pessoal do Bruno, versionada no repo <code>myclaude</code> (<code>~/.claude</code>). Está documentada aqui porque o desenho — isolamento por worktree, permissões por etapa, trava de release e portão de aprovação humano — vale para qualquer automação de agente que a gente venha a rodar sobre os repos da Boom.</p>
+</blockquote>
+
+<h2>1. Fluxo completo</h2>
+
+<p>O gatilho da fase 1 é o comando global <code>/me_boom_bot_fix</code>. O critério de entrada é configurável: cartão na lista <strong>Em andamento</strong>, com o membro <strong>Bruno</strong> e pelo menos uma das labels <strong>Correção / Fix</strong> ou <strong>Investigação</strong> — as labels são uma lista com semântica <strong>OU</strong>, não uma exigência combinada.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  T["Trello<br/>lista Em andamento<br/>+ membro Bruno<br/>+ Correção / Fix OU Investigação"]
+  F["fila.py<br/>filtra por lista, membro e label"]
+  DUP{"já tratado?<br/>branch remota ou<br/>Issue com trello #N"}
+  SKIP["pula o cartão"]
+  D["trello.py card N<br/>descrição, comentários e prints"]
+  P1["FASE 1 · TRIAGEM<br/>claude -p · sonnet · só leitura<br/>decide o repo entre os 6"]
+  ISS["gh issue create<br/>atribuída a você, label claude-bot"]
+  CONF{"repo definido e<br/>confiança maior que baixa?"}
+  STOP["para na Issue<br/>decisão humana"]
+  WT["branch do cartão em pé<br/>bugfix/AAAA.MM.DD.N sobre origin/default<br/>no clone app2, ou worktree em /tmp"]
+  P2["FASE 2 · CORREÇÃO<br/>claude -p · opus · edita e testa<br/>commita na branch do bot"]
+  COM{"gerou commit?"}
+  CMT["relatório vira<br/>comentário na Issue"]
+  PRES["sobrou diff sem commit?<br/>worktree preservado +<br/>.diff salvo fora dele"]
+  PUSH["git push origin bugfix/AAAA.MM.DD.N<br/>relatório vira comentário na Issue<br/>com link de compare"]
+  SUP["comenta na Issue a<br/>resposta pronta para o suporte"]
+  M["FASE 2<br/>/me_boom_bot_release"]
+
+  T --> F --> DUP
+  DUP -->|sim| SKIP
+  DUP -->|não| D --> P1 --> ISS --> CONF
+  CONF -->|não| STOP
+  CONF -->|sim| WT --> P2 --> COM
+  COM -->|não| CMT --> PRES
+  COM -->|sim| PUSH --> SUP --> M
+</code></pre>
+</div>
+
+<p>Três desfechos são todos considerados sucesso: <strong>branch + relatório</strong> (caminho feliz), <strong>só Issue</strong> (a triagem não teve confiança para mexer em código) e <strong>Issue com relatório em comentário</strong> (a correção investigou e concluiu que não devia commitar). O bot não é obrigado a produzir diff.</p>
+
+<p>Quando há branch, ela fica <strong>de pé no ambiente 2</strong> — o clone <code>app2</code> na porta 7003, para o repo do app (ver a seção do ambiente 2). É ali que a fase 2 vai revisar, e é ali que o dev confere na tela.</p>
+
+<p>A fase 2 pega de onde a fase 1 parou. O gatilho é <code>/me_boom_bot_release</code>:</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  L["release.py listar<br/>branches bugfix/ ainda<br/>fora da base"]
+  VAZIO["fila vazia<br/>nada a fazer"]
+  REV["Claude revisa cada uma<br/>diff + Issue + chamadores<br/>na própria sessão"]
+  VER{"veredito"}
+  FORA["fica de fora<br/>motivo em uma frase"]
+  TRAVA{"develop em dia<br/>com a base?"}
+  NAO["release.py recusa<br/>e mostra o que subiria junto"]
+  MONTA["release.py montar<br/>worktree descartável em /tmp<br/>merge --no-ff das aprovadas<br/>push só da release/"]
+  TELA["release.py revisar<br/>release de pé na 7003 (app2)"]
+  OK{"passou na tela?"}
+  DESC["release.py descartar<br/>e montar de novo sem o cartão"]
+  FIM["você: git flow release finish<br/>tag + master + develop"]
+  L --> VAZIO
+  L --> REV --> VER
+  VER -->|reprovada ou não sei| FORA
+  VER -->|aprovada| TRAVA
+  TRAVA -->|não| NAO
+  TRAVA -->|sim| MONTA --> TELA --> OK
+  OK -->|não| DESC
+  OK -->|sim| FIM
+</code></pre>
+</div>
+
+<h2>2. Anatomia</h2>
+
+<table>
+<thead><tr><th>Caminho</th><th>Papel</th><th>Versionado</th></tr></thead>
+<tbody>
+<tr><td><code>~/.claude/commands/me_boom_bot_fix.md</code></td><td>comando da <strong>fase 1</strong> (o gatilho)</td><td>sim, repo <code>myclaude</code></td></tr>
+<tr><td><code>~/.claude/commands/me_boom_bot_release.md</code></td><td>comando da <strong>fase 2</strong></td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/run.py</code></td><td>orquestrador da fase 1: triagem, correção, worktree, Issue</td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/release.py</code></td><td>o git da fase 2: <code>bugfix/</code> &rarr; <code>release/</code></td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/fila.py</code></td><td>consulta a fila no Trello</td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/botconf.py</code></td><td>leitura de config e cliente HTTP do Trello</td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/prompt-triagem.md</code></td><td>prompt da triagem</td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/prompt-fix.md</code></td><td>prompt da correção</td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/settings-*.json</code></td><td>allowlist/denylist de ferramentas por etapa</td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-bot/instala-terminator.py</code></td><td>põe as entradas do bot no menu do Terminator</td><td>sim</td></tr>
+<tr><td><code>~/.claude/scripts/boom-env-sync.py</code> + <code>/me_boom_env_sync</code></td><td>compara o <code>.env</code> do principal com o das worktrees</td><td>sim</td></tr>
+<tr><td><code>~/.config/terminator/config</code></td><td>menu do Terminator, <strong>por máquina</strong></td><td><strong>não</strong> — use o instalador</td></tr>
+<tr><td><code>~/.claude/skills/trello/</code></td><td>skill global de leitura do Trello (read-only)</td><td>sim</td></tr>
+<tr><td><code>~/.config/boom-bot/env</code></td><td><strong>credenciais e filtro</strong>, <code>chmod 600</code></td><td><strong>não</strong>, por design</td></tr>
+<tr><td><code>~/.local/state/boom-bot/</code></td><td>logs, lock e <code>processados.json</code></td><td>não</td></tr>
+</tbody>
+</table>
+
+<p>A separação importa: os scripts viajam entre as máquinas pelo repo <code>myclaude</code>, mas o token do Trello é pessoal e fica fora do git. Em máquina nova, o setup é criar o <code>~/.config/boom-bot/env</code> à mão — sem ele o <code>fila.py</code> sai com mensagem clara em vez de falhar torto.</p>
+
+<h2>3. Fase 1 — da demanda à branch</h2>
+
+<p>Cada cartão dispara <strong>duas sessões headless</strong> <code>claude -p</code> independentes — <em>triagem</em> e <em>correção</em> —, com permissões, modelo e teto de custo próprios. Nenhuma das duas pode fazer <code>git push</code> ou chamar <code>gh</code>: quem publica é o <code>run.py</code>.</p>
+
+<blockquote>
+<p>Cuidado com o vocabulário: <strong>fase</strong> aqui é sempre um dos dois comandos (produzir / julgar). As duas sessões headless de dentro da fase 1 são a <strong>triagem</strong> e a <strong>correção</strong>.</p>
+</blockquote>
+
+<table>
+<thead><tr><th></th><th>Triagem</th><th>Correção</th></tr></thead>
+<tbody>
+<tr><td>Onde roda</td><td><code>~/boom_docker_stack/Projects</code></td><td>o worktree do repo escolhido</td></tr>
+<tr><td>Modelo padrão</td><td><code>sonnet</code></td><td><code>opus</code></td></tr>
+<tr><td>Esforço</td><td><code>medium</code></td><td><code>high</code></td></tr>
+<tr><td>Teto de custo</td><td>US$ 1,50</td><td>US$ 6,00</td></tr>
+<tr><td>Timeout</td><td>20 min</td><td>50 min</td></tr>
+<tr><td>Escrita em arquivo</td><td><strong>negada</strong> (<code>Edit</code>, <code>Write</code>)</td><td>permitida</td></tr>
+<tr><td>Saída</td><td>JSON validado por <code>--json-schema</code></td><td>relatório markdown: vira comentário na Issue, e a última seção dele vira um segundo comentário</td></tr>
+</tbody>
+</table>
+
+<h3>3.1 Contrato de saída da triagem</h3>
+
+<p>A triagem não devolve prosa: devolve um objeto validado pelo schema passado em <code>--json-schema</code>, e o envelope do <code>--output-format json</code> já entrega o resultado parseado no campo <code>structured_output</code>.</p>
+
+<pre><code>{
+  "repo":      "app.boomsistemas.com.br",   // um dos 6, ou "indefinido"
+  "confianca": "alta",                       // alta | media | baixa
+  "titulo":    "Corrigir tela travada ao emitir NF com placa não cadastrada",
+  "resumo":    "markdown, vira o corpo da Issue",
+  "plano":     "markdown, vira o corpo da Issue",
+  "arquivos":  ["module/Application/view/application/fiscal/upload.phtml"],
+  "risco":     "texto livre"
+}</code></pre>
+
+<p><code>repo: "indefinido"</code> ou <code>confianca: "baixa"</code> encerram o fluxo na Issue. Isso é resposta desejável, não falha: abrir Issue e branch no repo errado custa mais caro que pedir decisão humana.</p>
+
+<h3>3.2 Correção / Fix x Investigação</h3>
+
+<p>O critério aceita as duas labels, e o bot <strong>sabe por qual delas o cartão entrou</strong>: o <code>fila.py</code> devolve o campo <code>labels_criterio</code> e os dois prompts recebem essa informação. A régua de sucesso muda conforme a natureza da demanda.</p>
+
+<table>
+<thead><tr><th></th><th>Correção / Fix</th><th>Investigação</th></tr></thead>
+<tbody>
+<tr><td>Premissa</td><td>existe comportamento errado a consertar</td><td>ainda não se sabe se há bug, dúvida, dado ou funcionalidade faltando</td></tr>
+<tr><td>Entrega esperada</td><td>diff que conserta</td><td>explicação do que o sistema faz hoje e por quê</td></tr>
+<tr><td><code>confianca: "baixa"</code></td><td>exceção</td><td>resultado comum e legítimo</td></tr>
+<tr><td>Terminar sem commit</td><td>exige justificativa no relatório</td><td>desfecho normal</td></tr>
+</tbody>
+</table>
+
+<p>Na prática, cartão de Investigação tende a parar na Issue ou virar comentário com a análise, e só produz branch quando a correção aparece evidente e pequena durante a leitura do código. É de propósito: investigação que vira diff chutado é pior que investigação bem escrita.</p>
+
+<h3>3.3 Mapa de testes por repo</h3>
+
+<p>A correção roda o comando de teste do repo e cola o resultado no relatório. Os repos sem suíte executável fora de ambiente de pé são declarados como tal — o bot avisa em vez de fingir que rodou.</p>
+
+<table>
+<thead><tr><th>Repo</th><th>Stack</th><th>Comando de teste</th></tr></thead>
+<tbody>
+<tr><td><code>app.boomsistemas.com.br</code></td><td>PHP (Laminas/Zend) + Vite</td><td>nenhum — só e2e Playwright, precisa de navegador</td></tr>
+<tr><td><code>api.boomsistemas.com.br</code></td><td>Node / TypeScript</td><td><code>npm run lint &amp;&amp; npm run typecheck &amp;&amp; npm test</code></td></tr>
+<tr><td><code>boomia</code></td><td>Laravel</td><td><code>composer test</code></td></tr>
+<tr><td><code>boom_cron</code></td><td>Laravel</td><td><code>composer test</code></td></tr>
+<tr><td><code>socket</code></td><td>Node / socket.io</td><td>nenhum</td></tr>
+<tr><td><code>boomsistemas_ci4</code></td><td>CodeIgniter 4</td><td><code>composer test</code></td></tr>
+</tbody>
+</table>
+
+<h2>4. Fase 2 — da branch à release</h2>
+
+<p>O <code>release.py</code> é o git da fase 2. Ele <strong>não chama Claude e não escreve código</strong>: quem julga o diff é o Claude da sessão do <code>/me_boom_bot_release</code>, seguindo o roteiro do comando. O script faz só a parte que não pode dar errado.</p>
+
+<pre><code>release.py listar                       # branches do bot esperando release
+release.py diff &lt;repo&gt; &lt;branch&gt;         # o diff contra a base, para revisar
+release.py montar &lt;repo&gt; &lt;br&gt; &lt;br&gt; ...  # monta e empurra a release/
+release.py revisar &lt;repo&gt; &lt;ref&gt;         # põe a ref de pé na 7003 (app2)
+release.py status                       # releases abertas em cada repo
+release.py descartar &lt;repo&gt; &lt;versao&gt;    # apaga uma release aberta</code></pre>
+
+<h3>4.1 Quem é candidata</h3>
+
+<p>Branch <code>origin/bugfix/AAAA.MM.DD.CARTAO</code> com pelo menos um commit fora da base. O critério é <strong>remoto</strong>, pelo mesmo motivo do <code>processados.json</code> ser por máquina: branch mergeada — por PR, à mão, ou pelo merge de <code>develop</code> em <code>master</code> — passa a ter zero commits fora da base e some da lista sozinha. Não há estado local a limpar, e a lista não mente depois de um <code>git pull</code> feito na outra máquina.</p>
+
+<p>Ficam de fora: branch escrita à mão (<code>bugfix/especial-performance</code> e afins, que não batem o formato do bot) e branch que já está dentro de uma <code>release/</code> aberta — sem esse segundo corte, rodar o comando duas vezes no mesmo dia mandaria revisar tudo de novo.</p>
+
+<h3>4.2 A trava: <code>develop</code> em dia com a base</h3>
+
+<p>É a primeira coisa que o <code>montar</code> checa, e a razão vale o parágrafo. O <code>git flow release finish</code> mergeia a release em <code>master</code> <strong>e</strong> em <code>develop</code>, e a release nasce de <code>develop</code> — então <strong>tudo o que estiver em develop e não em master sobe junto</strong>, revisado ou não. Uma feature esquecida ali viraria produção de carona numa release de bugfix.</p>
+
+<p>Com <code>develop == base</code> no momento da montagem, o conteúdo da release é exatamente o que foi mergeado nela, e nada mais. Se develop estiver à frente, o script recusa e imprime os commits que iriam junto; se estiver atrás, também recusa — aí o dev revisaria na tela um código diferente do que subiria. Hoje os quatro repos com <code>develop</code> estão 0/0 com a base, então na prática a trava não incomoda.</p>
+
+<h3>4.3 O que a fase 2 nunca faz</h3>
+
+<ul>
+<li><strong>Checkout no clone principal.</strong> A release é montada num worktree descartável em <code>/tmp/boom-bot-rel/</code>, que sai no fim. O HEAD do clone do dev não se mexe — a branch local <code>release/…</code> fica lá porque é dela que o <code>finish</code> precisa depois.</li>
+<li><strong>Push em <code>master</code>, <code>main</code> ou <code>develop</code>. Tag. <code>git flow release finish</code>.</strong> O único push é o da própria <code>release/</code>. Fechar é do dev, com o comando que o script imprime — já com <code>-m</code>, porque a versão é só a data e os números dos cartões precisam ficar na mensagem da tag.</li>
+<li><strong>Release pela metade.</strong> Conflito em qualquer merge desfaz tudo: aborta o merge, apaga o worktree e a branch local, e não empurra nada. A saída é resolver o conflito na própria <code>bugfix/</code> e montar de novo.</li>
+</ul>
+
+<p>A versão é <code>release/AAAA.MM.DD</code>, com sufixo <code>.2</code>, <code>.3</code> se o dia já tiver release ou tag homônima. É o formato de data das tags da equipe <em>sem</em> o número do cartão — porque a release justamente junta vários; os cartões ficam nas mensagens de merge e na da tag.</p>
+
+<p>A conferência na tela acontece <strong>depois</strong> de montar, de propósito: uma rodada de cliques na release inteira — que é o que vai subir — em vez de uma por cartão. O preço é precisar desmontar quando um cartão cai, e para isso existe o <code>descartar</code>: ele apaga a release (local e no origin), as <code>bugfix/</code> continuam de pé e voltam a aparecer no <code>listar</code>. Release que já entrou na base o script se recusa a apagar — ali o caminho é revert de commit, não delete de branch.</p>
+
+<h2>5. Decisões de desenho</h2>
+
+<h3>5.1 Worktree em vez de checkout no clone principal</h3>
+
+<p>O bot trata um cartão por vez, sequencialmente — nunca há dois trabalhos simultâneos. Ainda assim ele <strong>não</strong> faz <code>git checkout</code> no clone principal, porque o conflito que importa não é bot contra bot, e sim <strong>bot contra o dev</strong>:</p>
+
+<ul>
+<li>o dev está sempre numa branch própria (<code>feature/…</code>, <code>hotfix/…</code>, <code>develop</code>) e voltaria ao editor numa branch que não é a dele;</li>
+<li>o git carrega alteração não-commitada por cima do checkout quando ela não conflita — e a correção commita o que está no working tree. Um arquivo seu aberto durante os 20-30 minutos da rodada entraria no commit do bot.</li>
+</ul>
+
+<p>O worktree compartilha o <code>.git</code> do clone, então o custo é uma árvore a mais em disco, não um clone novo. Vale para os repos que ainda usam worktree — o <code>app.boomsistemas.com.br</code> saiu desse esquema e passou a ter um <strong>clone separado</strong> (ver 5.8); nos outros, a árvore continua em <code>/tmp/boom-bot-wt/</code>. Ele é criado antes da correção e removido depois — <strong>exceto</strong> quando sobra alteração sem commit dentro dele, caso em que fica de pé de propósito (ver 5.6).</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph LR
+  subgraph CLONE["Clone principal · Projects/boomia"]
+    HEAD["HEAD do dev<br/>hotfix/2026.08.25.3980<br/>+ stashes"]
+    GITDIR[".git<br/>objetos e refs"]
+    DEPS["vendor/ 1,5 GB<br/>gitignored"]
+  end
+  subgraph WORKTREE["Worktree · /tmp/boom-bot-wt/boomia--3799"]
+    BHEAD["HEAD do bot<br/>bugfix/2026.08.25.3799"]
+    LINK["vendor/ → symlink"]
+  end
+  GITDIR -. compartilhado .- BHEAD
+  DEPS -. symlink .- LINK
+</code></pre>
+</div>
+
+<h3>5.2 Dependências por symlink</h3>
+
+<p>Worktree novo só materializa o que está versionado — e as dependências são <code>gitignored</code> na maioria dos repos. Sem tratamento, <code>composer test</code> e <code>npm test</code> quebram por falta de <code>vendor/</code> ou <code>node_modules/</code>, produzindo um "teste falhou" que não tem relação com a correção.</p>
+
+<table>
+<thead><tr><th>Repo</th><th>Dependência</th><th>Versionada?</th><th>No worktree</th></tr></thead>
+<tbody>
+<tr><td><code>app.boomsistemas.com.br</code></td><td><code>vendor</code> 166 MB</td><td><strong>sim</strong></td><td>vem no checkout</td></tr>
+<tr><td><code>api.boomsistemas.com.br</code></td><td><code>node_modules</code> 321 MB</td><td>não</td><td>symlink</td></tr>
+<tr><td><code>boomia</code></td><td><code>vendor</code> 1,5 GB</td><td>não</td><td>symlink</td></tr>
+<tr><td><code>boom_cron</code></td><td><code>vendor</code> 753 MB</td><td>não</td><td>symlink</td></tr>
+<tr><td><code>boomsistemas_ci4</code></td><td><code>vendor</code> 108 MB</td><td>não</td><td>symlink</td></tr>
+</tbody>
+</table>
+
+<p>A função <code>preparar_deps()</code> liga cada diretório ao do clone principal. É instantâneo e não exige rede, mas tem duas consequências que estão codificadas no desenho:</p>
+
+<ul>
+<li>As dependências são as da branch default. <code>npm install</code>, <code>npm ci</code>, <code>composer install</code> e <code>composer update</code> estão na <strong>denylist</strong> da correção — instalar escreveria no clone principal através do link. Correção que exija dependência nova vira impedimento no relatório, não código.</li>
+<li><code>limpar_worktree()</code> remove os symlinks <strong>antes</strong> do <code>rmtree</code>. Sem essa ordem, a limpeza seguiria o link e apagaria o <code>vendor</code> de verdade. Os symlinks também ficam fora da conta de "worktree sujo" (o <code>.gitignore</code> dos repos usa <code>node_modules/</code>, com barra, que não casa com symlink — sem descartá-los, todo worktree pareceria sujo para sempre).</li>
+</ul>
+
+<h3>5.3 Namespace de branch separado do gitflow</h3>
+
+<p>O bot usa <code>bugfix/YYYY.MM.DD.TAREFA</code> (constante <code>BRANCH_PREFIX</code> no <code>run.py</code>): mesmo formato de data + cartão do fluxo manual, <strong>prefixo diferente</strong>. <code>hotfix/</code> é o que a equipe escreve à mão e o que o <code>finish</code> do gitflow transforma em <strong>tag homônima</strong> — com prefixo próprio, a branch do bot não disputa nome com a do humano no mesmo cartão e as duas se separam numa listagem (<code>git branch --list 'bugfix/*'</code>).</p>
+
+<p>A branch do bot <strong>nunca vira tag sozinha</strong>: na fase 2 ela morre dentro de uma <code>release/AAAA.MM.DD</code>, e a tag que sai é a da release — data, sem número de cartão. Então <code>bugfix/</code> e <code>hotfix/</code> do mesmo cartão no mesmo dia não disputam nome em lugar nenhum. (Antes da fase 2 existir, o caminho era o dev reaproveitar o commit à mão: foi o que aconteceu no cartão 3991, cujo commit virou <code>hotfix/2026.08.28.3991</code>.)</p>
+
+<p>A <em>mensagem de commit</em> continua no padrão do repo (<code>YYYY.MM.DD.TAREFA: descrição curta</code>).</p>
+
+<h3>5.4 Por que não abre Pull Request</h3>
+
+<p>Abriu, até <strong>2026-08-28</strong>. Saiu porque a PR do bot <strong>não podia ser aprovada</strong>, e PR que ninguém aprova é lixo acumulando no repo:</p>
+
+<ul>
+<li>o bot usa o <code>gh</code> autenticado <strong>como o dev</strong>, então a PR nascia com ele de autor — e o GitHub não deixa aprovar o próprio PR: na aba <em>Files changed</em> sobra só "Comment", nunca "Approve";</li>
+<li>e nascia em <strong>draft</strong>, que o GitHub se recusa a mergear enquanto não virar "ready for review" — dois cliques que ninguém lembrava de dar.</li>
+</ul>
+
+<p>O que a PR entregava de útil era o diff num link, e isso o comentário na Issue entrega igual, com <code>compare/&lt;base&gt;...&lt;branch&gt;</code>. A Issue nasce <strong>atribuída ao dev, com a label <code>claude-bot</code></strong> e sem reviewer: ninguém do time é notificado. Achar as suas: <code>is:issue author:@me label:claude-bot</code>.</p>
+
+<p>O impedimento é de <strong>identidade</strong>, não de configuração — enquanto o autor for a conta do dev, não existe Approve. A saída, se um dia fizer falta, é o bot deixar de ser o dev no GitHub: uma <em>machine account</em> na org com PAT próprio, e aí o Approve humano volta a valer. Enquanto isso não existir, reabrir PR seria voltar ao mesmo lixo — quem faz o papel de revisão hoje é a <strong>fase 2</strong>.</p>
+
+<h3>5.5 Idempotência</h3>
+
+<p>Cartão em "Em andamento" fica dias na lista, então rodar duas vezes não pode gerar duas Issues. São três camadas, da mais barata para a mais confiável:</p>
+
+<ol>
+<li><code>~/.local/state/boom-bot/processados.json</code> — estado local, por máquina;</li>
+<li><code>git ls-remote --heads origin 'refs/heads/*.&lt;n&gt;'</code> nos 6 repos — busca por <strong>sufixo</strong>, então reconhece a branch mesmo que ela tenha nascido em outro dia (ou com o prefixo do fluxo manual) e pega trabalho já publicado de qualquer máquina;</li>
+<li>busca de Issue com <code>trello #&lt;n&gt;</code> no título — best-effort, a indexação do GitHub tem atraso.</li>
+</ol>
+
+<p>Um <code>flock</code> em <code>~/.local/state/boom-bot/lock</code> garante uma rodada por vez na mesma máquina.</p>
+
+<h3>5.6 O hook <code>rtk</code> come a allowlist da correção</h3>
+
+<p>Precedente real, cartão <strong>3982</strong> em <strong>2026-08-28</strong>. A fase de correção escreveu o fix inteiro (dois arquivos, <code>CrmTable.php</code> e um <code>.phtml</code>), acumulou <strong>19 permissões negadas</strong>, terminou sem commit — e o <code>limpar_worktree()</code> apagou o worktree com o diff dentro. Sobrou uma Issue com relatório em prosa descrevendo um código que não existia em lugar nenhum: nem em branch, nem em disco. A recuperação só foi possível porque os <code>Edit</code> ficam gravados no transcript da sessão (<code>~/.claude/projects/&lt;slug-do-cwd&gt;/&lt;session-id&gt;.jsonl</code>), com <code>old_string</code> e <code>new_string</code> — dá para reaplicar de lá.</p>
+
+<p>A causa não estava no bot. O <code>~/.claude/settings.json</code> da estação tem um hook <code>PreToolUse</code> — <code>rtk hook claude</code>, um proxy de compactação de saída instalado por fora — que <strong>reescreve todo comando Bash</strong> antes de ele ser avaliado. Confira em qualquer máquina:</p>
+
+<pre><code>rtk hook check "git commit -m x"     # =&gt; rtk git commit -m x
+rtk hook check "grep -rn foo ."      # =&gt; rtk grep -rn foo .</code></pre>
+
+<p>A forma reescrita (<code>rtk git commit …</code>) não casa com nenhuma regra <code>Bash(git commit:*)</code> do <code>settings-fix.json</code>, então cai em pedido de aprovação; e em sessão headless não existe quem aprove. O efeito é duplo e traiçoeiro: <strong>a allowlist deixa de valer</strong> (o modelo perde comandos que deveria ter) e <strong>a denylist deixa de proteger</strong> (o deny de <code>git push</code> não casa com <code>rtk git push</code>). Pior: como o modelo viu <code>git status</code>, <code>git log</code> e <code>git diff</code> negados, concluiu que "git está bloqueado" e desistiu do commit — que estava liberado.</p>
+
+<p>Duas defesas. A primeira já está no código:</p>
+
+<ul>
+<li><strong>Worktree com alteração sem commit não é apagado.</strong> <code>limpar_worktree()</code> devolve <code>False</code>, escreve o caminho no log e o diff vai para <code>/tmp/boom-bot-wt/&lt;repo&gt;--&lt;n&gt;.diff</code>, <strong>fora</strong> do worktree — sobrevive a qualquer limpeza posterior. A função é <code>salvar_diff_pendente()</code>, e ela usa <code>git add -N</code> (intent-to-add) para arquivo novo aparecer no patch.</li>
+<li><strong>A rodada seguinte respeita o worktree preservado</strong> em vez de recriá-lo: para no cartão e diz o motivo.</li>
+<li><strong>Guarda de branch em uso:</strong> se o clone principal estiver justamente na branch que o bot ia criar, ele para no cartão com mensagem clara em vez de estourar um erro cru de git.</li>
+</ul>
+
+<p>A segunda é a lista de permissões, que precisa das duas formas de cada comando — a nua e a com <code>rtk </code>:</p>
+
+<pre><code>"allow": [ "Bash(rtk git add:*)", "Bash(rtk git commit:*)", "Bash(rtk git status:*)",
+           "Bash(rtk git diff:*)", "Bash(rtk git log:*)", "Bash(rtk grep:*)",
+           "Bash(rtk rg:*)", "Bash(rtk ls:*)", "Bash(rtk wc:*)", "Bash(rtk find:*)",
+           "Bash(rtk php -l:*)", "Bash(rtk npm test:*)", "Bash(rtk composer test:*)" ],
+"deny":  [ "Bash(rtk git push:*)", "Bash(rtk git checkout:*)", "Bash(rtk git reset:*)",
+           "Bash(rtk git branch:*)", "Bash(rtk git worktree:*)", "Bash(rtk gh:*)",
+           "Bash(rtk mysql:*)", "Bash(rtk docker:*)", "Bash(rtk aws:*)",
+           "Bash(rtk curl:*)", "Bash(rtk npm install:*)", "Bash(rtk composer install:*)",
+           "Bash(rtk run:*)", "Bash(rtk proxy:*)", "Bash(rtk pipe:*)" ]</code></pre>
+
+<p><strong>Os três últimos do <code>deny</code> não são opcionais:</strong> <code>rtk run</code>, <code>rtk proxy</code> e <code>rtk pipe</code> executam comando cru via <code>sh -c</code>. Sem eles na lista, todo o resto dos negados é contornável por uma linha.</p>
+
+<p>Alternativa mais limpa, ainda não testada: rodar as sessões do bot com o hook desligado (variável <code>RTK_DISABLED</code>) em vez de manter a lista duplicada. Enquanto isso não for feito, vale reler a linha de <strong>permissões negadas</strong> do log depois de cada rodada — é ela que denuncia o problema.</p>
+
+<h3>5.7 Toda Issue termina com a resposta pronta para o suporte</h3>
+
+<p>O relatório da fase de correção é escrito para dev — cita arquivo, linha, nome de método. Só que quem abriu a demanda foi o <strong>suporte</strong>, e alguém precisa responder o cartão do Trello em português de gente quando a correção subir. Fazer essa tradução à mão, depois, é o tipo de passo que se esquece.</p>
+
+<p>Por isso o <code>prompt-fix.md</code> obriga o relatório a fechar com uma seção <code>## Resposta para o suporte</code>: 3 a 5 linhas em bloco de citação, <strong>sem jargão</strong> — nada de arquivo, classe, tabela, SQL, código de rejeição, branch ou número de PR. Diz o que mudou na prática e o que a pessoa precisa fazer (ou que não precisa fazer nada), no passado, sem prometer data de deploy.</p>
+
+<p>O <code>run.py</code> recorta essa seção com <code>resposta_para_suporte()</code> e a publica como <strong>comentário separado na Issue</strong>, com a ressalva "depois que a branch for revisada e subir". Fica a um <code>ctrl+C</code> de distância, sem caçar no meio do relatório — e a Issue passa a ter, no fim, exatamente o texto que vai para o cliente.</p>
+
+<p>Se o modelo esquecer a seção, o log registra <code>relatório veio sem a seção "Resposta para o suporte"</code> e <strong>nada é inventado</strong>: melhor faltar do que o suporte colar no cartão um texto que ninguém escreveu de propósito.</p>
+
+<h3>5.8 O ambiente 2 — o clone <code>app2</code> na porta 7003</h3>
+
+<p>Todo relatório do bot terminava com "não validado na tela", e não é desleixo: o <code>app</code> não tem suíte que rode sem ambiente de pé, então o que ele entrega é diff mais análise, sem prova visual. A saída foi um <strong>segundo ambiente completo</strong>: <code>Projects/app2.boomsistemas.com.br</code>, um clone independente do repo — <code>.git</code>, <code>.env</code>, <code>vendor</code> e <code>node_modules</code> próprios — servido na <strong>porta 7003</strong> pelo mesmo nginx do stack.</p>
+
+<table>
+<thead><tr><th>Porta</th><th>Pasta</th><th>Uso</th></tr></thead>
+<tbody>
+<tr><td>7000</td><td><code>app.boomsistemas.com.br</code></td><td>as features do dev</td></tr>
+<tr><td><strong>7003</strong></td><td><code>app2.boomsistemas.com.br</code></td><td>trabalho paralelo do dev <strong>e</strong> o boom-bot</td></tr>
+<tr><td>7002</td><td><code>.worktrees/current</code></td><td>legado do <code>boom-wt</code>, se ainda for usado</td></tr>
+</tbody>
+</table>
+
+<p><strong>Não é worktree.</strong> São dois repositórios: dois <code>.git</code>, dois checkouts desprendidos, dois terminais ao mesmo tempo sem stash nem troca de branch. O que os dois compartilham é só o <strong>banco local</strong>, e é de propósito — cópia de 7,4 GB envelheceria rápido, e o <code>auth.setup.js</code> do E2E resolve o usuário consultando justamente esse banco. O custo é disco (≈470 MB), que sobra.</p>
+
+<p>Do lado do <code>run.py</code>:</p>
+
+<ul>
+<li><code>CLONES</code> mapeia repo → pasta do clone + URL. Para quem está no mapa o bot <strong>não cria worktree</strong>: <code>preparar_clone()</code> faz <code>fetch</code> + <code>checkout -B</code> ali mesmo. Os outros repos seguem em worktree descartável no <code>/tmp</code>.</li>
+<li><strong>Recusa quando há alteração rastreada sem commit</strong>, e salva o diff em <code>Projects/app2.boomsistemas.com.br.diff</code>. A pasta é compartilhada com o uso manual do dev; passar por cima do trabalho dele é exatamente o que não pode acontecer. Arquivo <strong>não rastreado</strong> não bloqueia — o <code>checkout</code> não mexe nele — e só entra no log.</li>
+<li><code>docker exec php7 kill -USR2 1</code> depois da troca: o php-fpm cacheia realpath por 120 s e sem isso a branch nova leva até 2 min para aparecer no navegador.</li>
+<li><strong>A branch fica de pé depois da rodada</strong> (não há limpeza no clone): é assim que se revisa o cartão na tela, abrindo a 7003.</li>
+</ul>
+
+<blockquote>
+<p><strong>O ambiente 2 serve as duas fases.</strong> A fase 1 trabalha o cartão ali (é o <code>preparar_clone()</code> acima); a fase 2 sobe ali a <code>release/</code> já montada, com <code>release.py revisar</code>, que faz o mesmo <code>checkout -B</code> mais o <code>kill -USR2</code> do php-fpm. Em ambos os casos o <code>app2</code> recusa a troca se houver alteração rastreada sem commit — a pasta é compartilhada com o uso manual do dev, e passar por cima do trabalho dele é o que não pode acontecer. Para o repo do <code>app</code>, <strong>todo trabalho do bot e toda conferência na tela acontecem na 7003</strong>; a 7000 é só do dev.</p>
+</blockquote>
+
+<p>Em máquina nova, além do <code>docker compose up -d nginx php7</code>: criar a pasta (clone do GitHub, ou <code>cp -a</code> do principal), copiar o <code>.env</code> com o <code>BASE_URL</code> apontando para <code>http://localhost:7003</code>, e acrescentar as duas entradas de <code>safe.directory</code> no git global (o caminho no host e o <code>/var/www/…</code>) — o container php7 faz <code>chown -R www-data</code> no <code>/var/www</code> e o git recusa repositório de outro dono.</p>
+
+<p>Como cada <code>.env</code> é uma cópia, eles envelhecem: variável nova entra num ambiente e o outro segue sem ela, o que aparece como bug de tela em vez de config velha. O comando <code>/me_boom_env_sync</code> compara os dois (e as worktrees, se houver) e classifica — faltando, valor diferente, só existe num lado — <strong>sem nunca imprimir valor de variável</strong>.</p>
+
+<p>Duas coisas que <strong>ainda não</strong> estão fechadas: a fase de correção não abre o navegador sozinha (precisaria de <code>Bash(npx playwright…)</code> na allowlist dela e de um caminho de login em dev), e o <code>.env</code> do clone é o do ambiente real do dev, com os segredos de verdade, num diretório onde a sessão headless roda — se isso incomodar, o lugar de fechar é <code>"deny": ["Read(./.env)"]</code> no <code>settings-fix.json</code>.</p>
+
+<h2>6. Configuração</h2>
+
+<p>Tudo em <code>~/.config/boom-bot/env</code>. Para mudar o critério de entrada, basta trocar o ID — descubra os IDs com <code>python3 ~/.claude/skills/trello/trello.py board</code>.</p>
+
+<table>
+<thead><tr><th>Variável</th><th>Valor atual</th><th>O que é</th></tr></thead>
+<tbody>
+<tr><td><code>TRELLO_API_KEY</code></td><td>—</td><td>key do app "Boom Automation" (do time)</td></tr>
+<tr><td><code>TRELLO_AUTH_TOKEN</code></td><td>—</td><td>token pessoal, <code>scope=read</code></td></tr>
+<tr><td><code>BOT_BOARD</code></td><td><code>674f08d5…2129</code></td><td>quadro Suporte - Equipe de desenvolvimento</td></tr>
+<tr><td><code>BOT_LIST</code></td><td><code>674f08ee…4c4e</code></td><td>lista <strong>Em andamento</strong></td></tr>
+<tr><td><code>BOT_LABEL</code></td><td><code>681e6dc3…623c,<br/>6a91a38b…e0c5</code></td><td><strong>Correção / Fix</strong> e <strong>Investigação</strong>. Lista separada por vírgula, semântica <strong>OU</strong></td></tr>
+<tr><td><code>BOT_MEMBER</code></td><td><code>673f8ca5…e05f</code></td><td>membro do Trello</td></tr>
+<tr><td><code>BOT_ORG</code></td><td><code>SistemasBoom</code></td><td>organização no GitHub</td></tr>
+<tr><td><code>BOT_MODEL_TRIAGEM</code> / <code>BOT_MODEL_FIX</code></td><td><code>sonnet</code> / <code>opus</code></td><td>modelo de cada fase</td></tr>
+<tr><td><code>BOT_EFFORT_TRIAGEM</code> / <code>BOT_EFFORT_FIX</code></td><td><code>medium</code> / <code>high</code></td><td>nível de esforço de cada fase</td></tr>
+<tr><td><code>BOT_BUDGET_TRIAGEM</code> / <code>BOT_BUDGET_FIX</code></td><td><code>1.50</code> / <code>6.00</code></td><td>teto em US$ por fase, por cartão</td></tr>
+<tr><td><code>BOT_MAX_CARDS</code></td><td><code>0</code></td><td>teto de cartões por rodada. <strong><code>0</code> = sem teto</strong>, vai até o fim da fila</td></tr>
+</tbody>
+</table>
+
+<h2>7. Como rodar</h2>
+
+<p>Pelo comando global, de qualquer diretório:</p>
+
+<pre><code>/me_boom_bot_fix                 # fase 1, rodada normal: Issue + branch
+/me_boom_bot_fix --dry-run       # lista a fila e as checagens, sem chamar Claude nem GitHub
+/me_boom_bot_fix --so-triagem    # só a triagem, imprime o JSON, não toca no GitHub
+/me_boom_bot_fix --card 1605     # força um cartão pelo nº da tarefa
+/me_boom_bot_fix --force         # reprocessa mesmo já existindo Issue ou branch
+
+/me_boom_bot_release             # fase 2: revisa as branches e monta a release
+/me_boom_bot_release --repo boomia   # só um repo</code></pre>
+
+<p>Digitar <code>/me_boom_bot</code> no menu filtra e mostra as duas fases.</p>
+
+<p>Direto, sem passar por uma sessão do Claude:</p>
+
+<pre><code>python3 ~/.claude/scripts/boom-bot/run.py --dry-run
+python3 ~/.claude/scripts/boom-bot/fila.py --human              # só ver a fila
+python3 ~/.claude/scripts/boom-bot/fila.py --human --sem-label  # ignorar o filtro de label
+
+python3 ~/.claude/scripts/boom-bot/release.py listar            # o que espera release
+python3 ~/.claude/scripts/boom-bot/release.py status            # releases abertas</code></pre>
+
+<p>Na primeira vez num repo, vale a escada: <code>--so-triagem</code> para conferir se ele acerta o repo, depois <code>--card N</code> para ir até o fim num cartão só, e só então a rodada sem argumento.</p>
+
+<p>Voltar ao automático é uma linha de <code>crontab</code>, mas aí releia a seção de idempotência — habilite numa máquina só:</p>
+
+<pre><code>0 * * * * /usr/bin/python3 $HOME/.claude/scripts/boom-bot/run.py &gt;&gt; $HOME/.local/state/boom-bot/cron.log 2&gt;&amp;1</code></pre>
+
+<h3>7.1 Rodar sem parar o seu trabalho</h3>
+
+<p><strong>O lugar de rodar em paralelo é o Terminator</strong>, não uma sessão do Claude: <code>/me_boom_bot_fix</code> prende a sessão que você usou pelos 20-30 min de cada cartão. O comando avisa e <em>pergunta</em> antes de disparar — mas não barra, porque deixar rodando e sair para o almoço é caso de uso legítimo. Rodando por fora, o próprio <code>run.py</code> percebe (env <code>CLAUDECODE</code>), deixa o aviso no log e segue.</p>
+
+<p>Menu de botão-direito do Terminator:</p>
+
+<table>
+<thead><tr><th>Entrada</th><th>O que faz</th></tr></thead>
+<tbody>
+<tr><td><code>BOOM-BOT</code></td><td>a rodada normal</td></tr>
+<tr><td><code>BOOM-BOT (dry-run)</code></td><td>só lista a fila e as checagens de duplicidade</td></tr>
+<tr><td><code>BOOM-BOT (log)</code></td><td><code>tail -f</code> no log do dia</td></tr>
+</tbody>
+</table>
+
+<p>O <code>~/.config/terminator/config</code> é <strong>por máquina</strong> e não viaja no <code>myclaude</code> — quem viaja é o instalador. Uma vez por PC, depois do <code>/me_sync</code>:</p>
+
+<pre><code>python3 ~/.claude/scripts/boom-bot/instala-terminator.py            # idempotente
+python3 ~/.claude/scripts/boom-bot/instala-terminator.py --dry-run  # só mostra</code></pre>
+
+<p>Ele faz backup do config, insere as entradas no plugin <code>CustomCommandsMenu</code> com a próxima <code>position</code> livre e corrige o comando se a entrada já existir com valor diferente. O Terminator só lê o config ao abrir: feche e abra a janela.</p>
+
+<p>Dá para disparar a rodada e continuar na sua branch de feature: no clone principal o bot só executa <code>git fetch origin &lt;default&gt;</code> e <code>git worktree add/remove/prune</code>. Nenhum desses mexe no seu <code>HEAD</code>, no índice, nos arquivos abertos ou nos stashes — o checkout do bot acontece na árvore de <code>/tmp</code>.</p>
+
+<table>
+<thead><tr><th>Situação</th><th>O que acontece</th></tr></thead>
+<tbody>
+<tr><td>Você está em <code>feature/x</code> e roda o bot</td><td>nada muda no seu diretório; ele trabalha em <code>/tmp/boom-bot-wt/</code></td></tr>
+<tr><td>Você está <strong>na branch que o bot vai criar</strong></td><td>ele para naquele cartão e loga o motivo (o git não deixa duas árvores usarem a mesma branch)</td></tr>
+<tr><td>Você roda <code>git</code> no exato instante do <code>worktree add</code></td><td>disputa de <code>index.lock</code>; é raro e o comando pede para repetir</td></tr>
+<tr><td>Sobra um worktree preservado de rodada anterior</td><td>o cartão seguinte daquele número para e avisa, até você resolver o <code>/tmp</code></td></tr>
+</tbody>
+</table>
+
+<p><strong>Uma tarefa por vez, sempre.</strong> O bot nunca roda dois cartões em paralelo: ele fecha um inteiro — triagem, Issue, worktree, correção, comentário — antes de olhar o próximo. O <code>BOT_MAX_CARDS</code> não tem relação com paralelismo; é freio de custo por rodada, e em <code>0</code> a rodada simplesmente varre a fila até o fim. A última linha do log soma o custo equivalente de todas as sessões da rodada.</p>
+
+<p><strong>Onde você trabalha em paralelo:</strong> no <code>app2</code>, o mesmo clone que o bot usa (ver 5.8). São dois repositórios de verdade, servidos em portas diferentes — dois terminais, dois checkouts, sem stash e sem troca de branch. O combinado é simples: se você deixar alteração <em>rastreada</em> sem commit lá, o bot para no cartão em vez de passar por cima; commite ou guarde antes de mandar uma rodada.</p>
+
+<h2>8. Limites conhecidos</h2>
+
+<ul>
+<li><strong>Branch protection é a trava real.</strong> A allowlist de ferramentas do Claude é trava local e tem furos conhecidos de casamento por prefixo (<code>git -C &lt;path&gt; push</code> não casa com o deny de <code>git push</code>, e um hook que reescreve o comando fura os dois lados da lista — ver 5.6). O que garante que nada entre na <code>master</code>/<code>main</code> sem revisão é a branch protection no GitHub — vale ligar nos 6 repos.</li>
+<li><strong>Custo.</strong> Uma triagem em <code>sonnet</code> num cartão real de suporte ficou em ~US$ 1,00 e ~6 minutos <em>rodando em <code>xhigh</code></em> — o <code>effortLevel</code> herdado do <code>~/.claude/settings.json</code>. Por isso o bot passa <code>--effort</code> explícito: sessão headless herda a config global do dev, e triagem no topo da escala é desperdício. Os freios de custo são <code>BOT_EFFORT_*</code>, <code>BOT_BUDGET_*</code> (corta a sessão ao atingir o teto) e <code>BOT_MAX_CARDS</code> — este último hoje em <code>0</code> (sem teto), então o freio efetivo por cartão é o budget. A rodada fecha o log com o total equivalente gasto.</li>
+<li><strong>Assinatura x API.</strong> Com login <code>claude.ai</code>, o <code>total_cost_usd</code> do log é o preço <em>equivalente</em> na API, não uma cobrança: o consumo real sai do limite de uso do plano. O número serve para comparar rodadas, não para prever fatura.</li>
+<li><strong>Dado pessoal.</strong> Cartão de suporte traz CPF, telefone, endereço e placa, inclusive nos prints. Os dois prompts proíbem copiar isso para Issue ou commit — o <code>filial_id</code> do título pode aparecer, por ser id interno. Quem escreve o texto é o modelo: <strong>confira na revisão</strong>.</li>
+<li><strong>Produção nunca é tocada.</strong> Acesso a banco, migrations e chamadas externas de escrita estão na denylist das duas etapas da fase 1. A fase 2 não roda código nenhum: só git.</li>
+<li><strong>Duas máquinas.</strong> O estado local é por máquina; a proteção contra duplicar é remota. Rodando manual, basta. No cron simultâneo em duas máquinas existe janela de duplicação.</li>
+<li><strong><code>gh</code> 2.4.0</strong> (pacote Ubuntu, de 2022) não tem <code>gh label</code> — o <code>run.py</code> cria a label pela API REST. Atualizar o <code>gh</code> não quebra nada.</li>
+<li><strong>A fase 2 não roda testes de novo.</strong> A revisão é leitura do diff (com os chamadores em volta) mais a conferência na 7003; os testes são os que a fase 1 já rodou, e o que ela conseguiu rodar está na seção <em>Testes</em> da Issue. Em repo sem suíte (<code>app</code>, <code>socket</code>) o peso todo fica na tela.</li>
+<li><strong>A release é por repo.</strong> Uma rodada da fase 1 pode espalhar cartões por vários repos; cada um vira a sua própria <code>release/</code>, com o seu próprio <code>finish</code>. E repo sem <code>develop</code> (hoje o <code>socket</code>) não tem release do gitflow: ali o caminho continua sendo <code>hotfix/</code> por cartão.</li>
+</ul>
+
+<h2>9. Depurar</h2>
+
+<pre><code>tail -f ~/.local/state/boom-bot/logs/$(date +%F).log
+cat ~/.local/state/boom-bot/logs/1605-triagem.json   # envelope cru do claude -p
+cat ~/.local/state/boom-bot/processados.json
+ls  /tmp/boom-bot-wt/                                # worktree preservado + .diff pendente
+ls  /tmp/boom-bot-rel/                               # worktree de montagem da release</code></pre>
+
+<p>As duas fases escrevem no <strong>mesmo log do dia</strong>. A fase 2 registra <code>montando release/…</code>, cada <code>merge …</code> e <code>… empurrada</code>; quando ela <em>recusa</em>, a mensagem vai para o <code>stderr</code> do comando e não para o log — é o texto que explica o motivo, e vale colar inteiro em vez de resumir. Estado da fase 2 é sempre remoto: <code>release.py listar</code> e <code>release.py status</code> respondem consultando o <code>origin</code>, então não há arquivo de estado para ficar mentindo.</p>
+
+<p>Três linhas do log valem procura direta: <code>worktree PRESERVADO</code> (sobrou diff sem commit — o caminho vem na sequência), <code>diff pendente salvo em</code> (onde está o patch) e <code>parando na Issue</code> (o cartão foi abandonado antes do código, com o motivo).</p>
+
+<p>O log registra, por fase: custo em dólar, duração, número de turnos e <strong>as permissões negadas</strong>. Essa última linha é o primeiro lugar para olhar quando o bot rende pouco — comando negado por formato (por exemplo <code>cd X &amp;&amp; git log</code>, que só passa se <code>cd</code> também estiver na allowlist) faz o modelo gastar turnos contornando em vez de investigar.</p>

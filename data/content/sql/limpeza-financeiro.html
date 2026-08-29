@@ -1,0 +1,38 @@
+<!--
+title: Limpeza do Financeiro
+description: Rotina de limpeza dos registros financeiros.
+published: 1
+date: 2026-08-26T15:03:24.057Z
+tags: financeiro, sql
+editor: ckeditor
+dateCreated: 2025-10-15T23:16:13.638Z
+-->
+
+<pre><code class="language-plaintext">SELECT SQL_NO_CACHE 
+	f.filial_name 'Filial',
+	l.lancamento_descricao 'Lancamento',
+	t.tipo_descricao 'Tipo',
+	c.categoria_descricao 'Categoria',
+	l.lancamento_referencia 'Referencia',
+	l.lancamento_observacao 'Observacao',
+	l.lancamento_valor 'Valor',
+	IF(l.lancamento_pago = 1, 'Pago', 'Pendente') AS 'Pago',
+	IF(l.lancamento_status = 1, 'Ativo', 'Inativo') AS 'Status',
+	DATE_FORMAT(l.lancamento_data, '%d-%m-%Y') 'Data',
+	DATE_FORMAT(l.lancamento_data_processamento, '%d-%m-%Y') 'Data Pag',
+	DATE_FORMAT(l.lancamento_data_cadastro, '%d-%m-%Y') 'Data Cadastro',
+	DATE_FORMAT(l.lancamento_update, '%d-%m-%Y') 'Data Atualizacao',
+	cc.caixa_conta_descricao AS 'Conta',
+	u.user_email AS 'Usuário'
+FROM
+	sis_financeiro_lancamento l
+INNER JOIN sis_filial f ON f.filial_id = l.filial_id
+INNER JOIN sis_financeiro_tipo t ON t.tipo_id = l.tipo_id
+INNER JOIN sis_financeiro_categoria c ON c.categoria_id = l.categoria_id
+LEFT JOIN sis_financeiro_caixa_conta cc ON cc.caixa_conta_id = l.lancamento_conta_id
+LEFT JOIN sis_user u ON u.user_id = l.lancamento_last_user_id 
+WHERE
+	l.filial_id IN (FILIAL_ID)
+	AND l.lancamento_status IN (1) 
+ORDER BY l.lancamento_data ASC, t.tipo_id ASC, c.categoria_descricao ASC;</code></pre>
+<p>Você também pode ver essas querys e outras no DB_GATE</p>

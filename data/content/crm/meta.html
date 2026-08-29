@@ -1,0 +1,224 @@
+<!--
+title: Meta
+description: Messenger e Instagram Direct: webhook x e-mail, meta_sender_id, lock de conversa e erros de token.
+published: 1
+date: 2026-08-27T02:42:20.619Z
+tags: chat, crm, integracoes, leads, meta
+editor: ckeditor
+dateCreated: 2025-12-19T14:31:34.577Z
+-->
+
+<h1>Meta — Messenger e Instagram Direct</h1>
+
+<p>Como na <a href="/crm/olx">OLX</a>, lead da Meta entra por <strong>dois caminhos</strong>, e só um deles habilita o chat. A diferença aqui é o par <code>meta_sender_id</code> / <code>meta_recipient_id</code>: <strong>sem os dois, não existe conversa para responder</strong>.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  U["Usuario no Messenger / Instagram"] --> A{"Como chega"}
+  A -->|"webhook da Meta"| WH["/messengermeta-ee077033-...<br/>action messengerMeta"]
+  A -->|"e-mail de notificacao"| ZO["Zoho -> zohoAction<br/>origem 54 meta-instagram"]
+
+  WH --> RM["CrmMetaTable::receiveMessage"]
+  RM --> G{"sender.id e recipient.id<br/>presentes?"}
+  G -->|nao| X["return false<br/>lead nem e criado"]
+  G -->|sim| L1["lead COM meta_sender_id<br/>+ meta_recipient_id<br/>origem 22 ou 23"]
+  ZO --> L2["lead SEM meta_sender_id"]
+
+  L1 --> OK["aba de chat funciona"]
+  L2 --> NO["sem aba de chat"]
+</code></pre>
+</div>
+
+<h2>O guard que explica a queixa original</h2>
+
+<p>A primeira linha útil de <code>CrmMetaTable::receiveMessage()</code>:</p>
+
+<pre><code>if (isset($data['entry'][0]['messaging'][0]['recipient']['id']) === false
+ || isset($data['entry'][0]['messaging'][0]['sender']['id'])   === false) {
+    return $success;   // false — sai sem criar nada, sem log
+}</code></pre>
+
+<p>É literalmente isso que a observação antiga da página descrevia. Só que ela vale para o <strong>webhook</strong>: se o evento chega sem os dois IDs, o lead <strong>nem é criado</strong> por esse caminho. O lead que o operador vê na tela nesse cenário veio do <strong>outro</strong> caminho (e-mail via Zoho), e é por isso que ele existe mas não tem chat.</p>
+
+<p>Repare também que esse <code>return</code> é <strong>silencioso</strong> — não há <code>handleLog</code> aqui. Evento descartado por falta de ID não deixa rastro em lugar nenhum.</p>
+
+<h2>Números reais</h2>
+
+<p>Leads com <code>origem_id</code> 22 (facebook) e 23 (instagram), na réplica:</p>
+
+<table>
+<thead><tr><th>Mês</th><th>Leads</th><th>Com <code>meta_sender_id</code></th><th>%</th></tr></thead>
+<tbody>
+<tr><td>2026-03</td><td>11.396</td><td>8.026</td><td>70,4%</td></tr>
+<tr><td>2026-04</td><td>11.926</td><td>7.859</td><td>65,9%</td></tr>
+<tr><td>2026-05</td><td>14.681</td><td>11.467</td><td>78,1%</td></tr>
+<tr><td>2026-06</td><td>13.777</td><td>10.567</td><td>76,7%</td></tr>
+<tr><td>2026-07</td><td>16.761</td><td>12.455</td><td>74,3%</td></tr>
+<tr><td>2026-08</td><td>15.675</td><td>11.447</td><td>73,0%</td></tr>
+</tbody>
+</table>
+
+<p>Em 90 dias, quebrado por origem:</p>
+
+<table>
+<thead><tr><th>Origem</th><th>Leads</th><th>Com <code>meta_sender_id</code></th><th>%</th></tr></thead>
+<tbody>
+<tr><td>23 <code>instagram</code></td><td>38.243</td><td>32.911</td><td>86%</td></tr>
+<tr><td>22 <code>facebook</code></td><td>9.381</td><td>2.628</td><td>28%</td></tr>
+<tr><td>54 <code>meta-instagram</code></td><td>960</td><td>0</td><td>0%</td></tr>
+<tr><td>53 <code>meta-messenger</code></td><td>382</td><td>0</td><td>0%</td></tr>
+</tbody>
+</table>
+
+<p>Duas leituras importantes:</p>
+
+<ul>
+<li><strong>As origens 53 e 54 são de e-mail, não do webhook.</strong> <code>54 meta-instagram</code> está cadastrada em <code>sis_crm_origem_remetente</code> apontando para <code>willan.costa@v4company.com</code> — ou seja, chega como e-mail encaminhado e cai no parser genérico. Zero desses leads terá chat, por construção. O webhook <strong>nunca</strong> grava 53 ou 54.</li>
+<li>As origens 22 e 23 também recebem leads criados manualmente e por outros fluxos, então o percentual acima <strong>não é</strong> puramente "webhook vs e-mail" — é o teto do que tem chat disponível.</li>
+</ul>
+
+<h2>Caminho 1 — webhook nativo</h2>
+
+<p>Rota (segmento em <code>module.config.php</code>): <code>/messengermeta-ee077033-9a15-4380-99cc-a1354ffe1132</code>, com o comentário <code>//uidv4 anti scan</code>. Como na OLX, o UUID é ofuscação, não autenticação.</p>
+
+<p>A filial é resolvida por <code>$findPages</code>, vindo de <code>sis_filial_crm_meta_pages</code> — a tabela que liga <code>page_id</code> / <code>instagram_id</code> → <code>filial_id</code> + <code>token</code>.</p>
+
+<h3>Origem: 22 ou 23, decidido pelo <code>object</code></h3>
+
+<pre><code>"origem_lead" =&gt; $data['object'] === 'page' ? 22 : 23,</code></pre>
+
+<p><code>object: "page"</code> ⇒ Messenger (22 facebook). Qualquer outra coisa ⇒ 23 instagram. É um <em>else</em> aberto: um <code>object</code> novo da Meta cairia em "instagram" silenciosamente.</p>
+
+<h3>Lock de conversa — race condition real</h3>
+
+<p>Antes de procurar o lead, o código adquire um lock nomeado no MariaDB. O comentário documenta o incidente que originou isso:</p>
+
+<pre><code>// Lock de conversa (GET_LOCK nativo do MariaDB, mesma conexão do adapter master):
+// evita que dois eventos da Meta pra mesma conversa (filial+sender+recipient), chegando
+// quase simultâneos, façam o SELECT abaixo ao mesmo tempo e cada um crie o próprio lead
+// (race condition confirmada — card Trello #3085, dois eventos com message_mid distintos
+// no mesmo segundo). Libera sozinho se a conexão cair, sem TTL pra adivinhar.
+
+$lockName = 'meta-lead:' . $filialId . ':' . min($senderId, $recipientId)
+                                     . ':' . max($senderId, $recipientId);
+$lockResult   = $this-&gt;adapter-&gt;query('SELECT GET_LOCK(?, ?) AS acquired', [$lockName, 10]);
+$lockAcquired = (bool) $lockResult-&gt;current()['acquired'];
+if (!$lockAcquired) {
+    handleLog(false, "timeout ao adquirir lock meta-lead: {$lockName}", 'meta', 'lock-timeout', false);
+}</code></pre>
+
+<p>Note o <code>min()</code>/<code>max()</code> na chave: <strong>garante o mesmo lock independente da direção da mensagem</strong>. E note que o timeout de 10s apenas <em>loga</em> — o código <strong>segue mesmo sem o lock</strong>, então sob contenção extrema a duplicata ainda é possível. Se aparecer lead Meta duplicado de novo, procure por <code>pasta meta / arquivo lock-timeout</code> no Papa Entulho.</p>
+
+<h3>Busca bidirecional do lead</h3>
+
+<p>A conversa é a mesma nas duas direções, então a busca é feita duas vezes com os IDs trocados:</p>
+
+<pre><code>// 1ª tentativa
+['meta_recipient_id' =&gt; $recipientId, 'meta_sender_id' =&gt; $senderId, ...]
+
+// 2ª tentativa — "não importa a ordem, significa ser o mesmo lead"
+['meta_recipient_id' =&gt; $senderId,    'meta_sender_id' =&gt; $recipientId, ...]</code></pre>
+
+<p>Ambas filtram por <code>status_id IN (colunas visíveis)</code> — <strong>lead em coluna oculta não é encontrado e um novo é criado</strong>. Esse é um efeito colateral fácil de confundir com duplicação: mexer em <code>crm_status_view</code> muda o comportamento da integração.</p>
+
+<h3>Eco da própria loja</h3>
+
+<pre><code>if ($senderId == $findPages[0]['instagram_id'] || $senderId == $findPages[0]['page_id']) {
+    handleLog(true, "Usuário {$senderId} é o mesmo da loja, ignora criação do lead...", "meta", "own_create_lead", ...);
+    return false;
+}</code></pre>
+
+<p>Mensagem enviada <em>pela</em> loja volta como evento no webhook. Sem esse guard, toda resposta do atendente viraria um lead novo.</p>
+
+<h3>Nome do cliente via Graph API</h3>
+
+<p>A Meta não manda o nome no payload — é preciso buscar:</p>
+
+<pre><code>$fb = new \Facebook\Facebook([
+    'app_id'                =&gt; getenv('facebook_crm_id'),
+    'app_secret'            =&gt; getenv('facebook_crm_secret'),
+    'default_graph_version' =&gt; 'v24.0',
+]);
+$response = $fb-&gt;get("/{$senderId}?fields=name,username", $pageAccessToken);</code></pre>
+
+<p>Ordem de fallback: <code>name</code> → <code>username</code> → <code>"Lead Sem Nome"</code>. Falha na Graph API (permissão, usuário inexistente) é capturada e o default é mantido — <strong>o lead é criado de qualquer jeito</strong>. Um comentário registra que e-mail não é obtenível: <em>"meta não permite"</em>. Por isso lead de Meta nasce com <code>telefone_lead = null</code> e <code>email_lead</code> ausente: <strong>o chat é o único canal de contato</strong>, o que torna a perda do <code>meta_sender_id</code> especialmente cara aqui.</p>
+
+<p>Cada tentativa de captura de nome gera log (pasta <code>meta</code>, arquivo <code>name_capture</code>) — útil para medir quantos leads estão nascendo sem nome.</p>
+
+<h2>Caminho 2 — e-mail via Zoho</h2>
+
+<p><code>leadInicial()</code> nunca inclui <code>meta_sender_id</code>/<code>meta_recipient_id</code> no array, e <code>saveLead()</code> só grava as colunas com a chave presente:</p>
+
+<pre><code>if (isset($lead['meta_recipient_id'])) { $data['meta_recipient_id'] = $lead['meta_recipient_id']; }
+if (isset($lead['meta_sender_id']))    { $data['meta_sender_id']    = $lead['meta_sender_id']; }</code></pre>
+
+<p>Resultado: colunas <code>NULL</code>, chat impossível. Igual à OLX — o dado não existe no e-mail, então não há parser que resolva.</p>
+
+<h2>Por que "Token Meta não encontrado"</h2>
+
+<p>No envio (<code>CrmIntegracaoController</code>), o token da página é procurado em <strong>quatro tentativas</strong>, e tudo depende de <code>meta_recipient_id</code> estar preenchido:</p>
+
+<pre><code>$searchToken = "";
+if ($lead["meta_recipient_id"]) {
+    // 1. page_id      = meta_recipient_id
+    // 2. page_id      = meta_sender_id
+    // 3. instagram_id = meta_recipient_id
+    // 4. instagram_id = meta_sender_id
+}
+if (empty($searchToken)) {
+    return ... "msg" =&gt; "Token Meta não encontrado.";
+}</code></pre>
+
+<p>As quatro variações existem porque, dependendo de quem iniciou a conversa, a página da loja pode estar em qualquer um dos dois campos — e pode ser page do Facebook ou conta do Instagram.</p>
+
+<p><strong>Diagnóstico:</strong> a mensagem <em>"Token Meta não encontrado"</em> tem duas causas bem diferentes:</p>
+
+<ol>
+<li><code>meta_recipient_id</code> é <code>NULL</code> ⇒ o lead veio por e-mail. O <code>if</code> externo nem entra. <strong>Não tem conserto pelo lead.</strong></li>
+<li><code>meta_recipient_id</code> preenchido mas nenhuma das 4 buscas casou ⇒ a página/conta não está em <code>sis_filial_crm_meta_pages</code>, ou o token foi revogado. <strong>Reconectar a integração</strong> (<code>metaCrmConnect</code>) resolve.</li>
+</ol>
+
+<p>Diferencie olhando a coluna antes de mandar o cliente reconectar.</p>
+
+<h2>Envio da mensagem</h2>
+
+<pre><code>$recipientId = $lead['meta_sender_id']; // nesse caso é para quem vamos enviar a mensagem
+$baseUrl = "https://graph.facebook.com/v21.0";</code></pre>
+
+<p>Com anexo, o fluxo é em duas etapas: <strong>upload do arquivo</strong> (obtém <code>attachment_id</code>, via stream Guzzle) e depois o envio referenciando esse id — diferente da OLX, que só manda texto.</p>
+
+<p><strong>Inconsistência a corrigir um dia:</strong> a recepção usa Graph <strong>v24.0</strong> e o envio usa <strong>v21.0</strong>. Duas versões da API no mesmo fluxo, cravadas em arquivos diferentes — quando a Meta depreciar uma delas, só metade da integração quebra, o que torna o sintoma confuso.</p>
+
+<h2>Rotas de LGPD</h2>
+
+<p>A Meta exige endpoints de exclusão de dados para aprovar o app. Estão em <code>module.config.php</code>:</p>
+
+<ul>
+<li><code>/meta/integration-delete-lgpd</code> → <code>metaIntegrationDeleteLGPD</code></li>
+<li><code>/meta/crm-delete-lgpd</code> → <code>metaCrmDeleteLGPD</code></li>
+<li><code>/meta/deletion-status</code> → <code>metaDeletionStatusLGPD</code> (view <code>meta-deletion-status-lgpd.phtml</code>)</li>
+</ul>
+
+<p>São exigência da plataforma, não feature interna — <strong>não desative essas rotas</strong> sem alinhar com quem administra o app na Meta.</p>
+
+<h2>Tabelas envolvidas</h2>
+
+<table>
+<thead><tr><th>Tabela</th><th>Papel</th></tr></thead>
+<tbody>
+<tr><td><code>sis_filial_crm_meta_pages</code></td><td><code>page_id</code>, <code>instagram_id</code>, <code>token</code>, <code>filial_id</code> — resolve filial e autentica o envio</td></tr>
+<tr><td><code>sis_crm_lead</code></td><td><code>meta_sender_id</code>, <code>meta_recipient_id</code> — a identidade da conversa</td></tr>
+<tr><td><code>sis_crm_lead_meta_message</code></td><td>histórico de mensagens (<code>hasMessagesLead()</code>)</td></tr>
+</tbody>
+</table>
+
+<h2>Resumo para o suporte</h2>
+
+<ul>
+<li>Lead Meta <strong>sem chat</strong> = <code>meta_sender_id</code> NULL = veio por e-mail. Esperado; não é falha da filial.</li>
+<li>Como Meta não fornece telefone nem e-mail, esse lead fica <strong>sem nenhum canal de contato</strong> — mais grave que na OLX.</li>
+<li>Origens 53/54 são de e-mail: <strong>nunca</strong> terão chat.</li>
+<li>Lead duplicado ⇒ ver <code>meta/lock-timeout</code> no Papa Entulho, e conferir se alguém mexeu em <code>crm_status_view</code> das colunas.</li>
+<li>"Lead Sem Nome" ⇒ Graph API não devolveu <code>name</code> nem <code>username</code>; ver logs <code>meta/name_capture</code>.</li>
+</ul>

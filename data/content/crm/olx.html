@@ -1,0 +1,184 @@
+<!--
+title: OLX
+description: Dois caminhos de entrada (webhook de chat x e-mail via Zoho) e por que 2 em cada 3 leads nao tem chat.
+published: 1
+date: 2026-08-27T02:42:18.337Z
+tags: chat, crm, integracoes, leads, olx
+editor: ckeditor
+dateCreated: 2025-12-19T14:28:35.795Z
+-->
+
+<h1>OLX — Leads e Chat</h1>
+
+<p>Lead de OLX entra no CRM por <strong>dois caminhos independentes</strong>, e a diferença entre eles é a causa do problema mais reclamado da integração: <strong>o lead aparece, mas a aba de chat não</strong>.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  C["Comprador na OLX"] --> A{"Como o contato chega"}
+  A -->|"chat da OLX"| WH["Webhook nativo<br/>/chat-olx-.../:filial_id"]
+  A -->|"e-mail de proposta"| ZO["noreply@olx.com.br<br/>-> Zoho -> zohoAction"]
+
+  WH --> M["CrmOlxTable::receiveMessage"]
+  M --> L1["lead COM olx_chat_id<br/>+ olx_anuncio_id"]
+  ZO --> P["leadInicial(origem 2)<br/>parser de e-mail"]
+  P --> L2["lead SEM olx_chat_id"]
+
+  L1 --> OK["aba de chat funciona"]
+  L2 --> NO["sem aba de chat<br/>so telefone/e-mail"]
+</code></pre>
+</div>
+
+<h2>O tamanho real do problema</h2>
+
+<p>Medido na réplica, leads com <code>origem_id = 2</code> (OLX):</p>
+
+<table>
+<thead><tr><th>Mês</th><th>Leads OLX</th><th>Com <code>olx_chat_id</code></th><th>% com chat</th></tr></thead>
+<tbody>
+<tr><td>2026-03</td><td>5.933</td><td>1.605</td><td>27,1%</td></tr>
+<tr><td>2026-04</td><td>6.291</td><td>1.541</td><td>24,5%</td></tr>
+<tr><td>2026-05</td><td>6.564</td><td>1.950</td><td>29,7%</td></tr>
+<tr><td>2026-06</td><td>6.818</td><td>2.268</td><td>33,3%</td></tr>
+<tr><td>2026-07</td><td>7.675</td><td>2.523</td><td>32,9%</td></tr>
+<tr><td>2026-08</td><td>6.909</td><td>2.443</td><td>35,4%</td></tr>
+</tbody>
+</table>
+
+<p><strong>Cerca de dois terços dos leads de OLX não têm chat.</strong> Nos últimos 90 dias são 22.007 leads, dos quais só 7.430 têm <code>olx_chat_id</code>. A tendência é de melhora lenta (27% → 35%), mas isso é o normal da integração, não uma anomalia pontual.</p>
+
+<p>Query para reconferir:</p>
+
+<pre><code>SELECT DATE_FORMAT(crm_lead_data,'%Y-%m') AS mes,
+       COUNT(*) AS leads,
+       SUM(olx_chat_id IS NOT NULL) AS com_chat,
+       ROUND(100*SUM(olx_chat_id IS NOT NULL)/COUNT(*),1) AS pct
+FROM sis_crm_lead
+WHERE origem_id = 2 AND crm_lead_data &gt;= '2026-03-01'
+GROUP BY mes ORDER BY mes;</code></pre>
+
+<h2>Caminho 1 — webhook nativo (com chat)</h2>
+
+<p>Rota: <code>/chat-olx-65613f41-c104-450e-bf19-f19c03e340b4/:filial_id</code> — o UUID no path é <em>anti-scan</em> (o comentário no <code>module.config.php</code> diz isso literalmente), não autenticação. Handler: <code>CrmOlxTable::receiveMessage()</code>.</p>
+
+<p>O que ele faz, em ordem:</p>
+
+<ol>
+<li>Carrega as colunas do funil (<code>sis_crm_status</code>) da filial e monta a lista de status visíveis (<code>crm_status_view</code>). Sem colunas ⇒ aborta com log <code>[OLX] Erro ao buscar status do lead</code>.</li>
+<li>Procura lead existente por <code>olx_chat_id = chatId</code> dentro dos status visíveis. <strong>O <code>chatId</code> é a chave da conversa</strong>, não o telefone nem o e-mail.</li>
+<li>Se não existe e <code>$origin === 'seller'</code>, <strong>ignora</strong> — é mensagem da loja, não do comprador, e não deve abrir lead.</li>
+<li>Se não existe e é do comprador, cria o lead.</li>
+</ol>
+
+<p>O lead criado por esse caminho é o único que nasce completo para chat:</p>
+
+<pre><code>"origem_lead"      =&gt; 2,
+"titulo_lead"      =&gt; "Contato via OLX (chat)",
+"cliente_lead"     =&gt; $data['name'] ?? "Lead OLX Sem Nome",
+"telefone_lead"    =&gt; telefoneMask($senderPhone),
+"email_lead"       =&gt; $senderEmail,
+"chat_external_id" =&gt; "55" . $senderPhone,
+"olx_chat_id"      =&gt; $chatId,        // &lt;-- o que habilita o chat
+"olx_anuncio_id"   =&gt; $listId,
+"meta_recipient_id"=&gt; null,           // Não é Meta
+"meta_sender_id"   =&gt; null,           // Não é Meta
+"ia_atendimento"   =&gt; $iaConfig['canal_ativo'] ? 1 : 0,</code></pre>
+
+<p>Note o <code>"55" . $senderPhone</code> hardcoded em <code>chat_external_id</code>: <strong>assume Brasil</strong>. Telefone estrangeiro fica com DDI errado.</p>
+
+<h2>Caminho 2 — e-mail via Zoho (sem chat)</h2>
+
+<p>Quando o contato vem como <em>proposta por e-mail</em> (<code>noreply@olx.com.br</code>), ele entra pelo pipeline genérico de e-mail: <code>zohoAction()</code> → <code>getOrigemRemetente()</code> → <code>leadInicial($filial, 2, $body)</code>. Detalhes em <a href="/crm/lead-zoho">Zoho - Leads</a>.</p>
+
+<p><code>leadInicial()</code> monta o <code>$dataLead</code> a partir do HTML do e-mail e <strong>nunca inclui a chave <code>olx_chat_id</code></strong>. E <code>CrmTable::saveLead()</code> só grava a coluna se a chave existir no array:</p>
+
+<pre><code>if (isset($lead['olx_chat_id'])) {
+    $data['olx_chat_id'] = $lead['olx_chat_id'];
+}
+if (isset($lead['olx_anuncio_id'])) {
+    $data['olx_anuncio_id'] = $lead['olx_anuncio_id'];
+}</code></pre>
+
+<p>Resultado: coluna fica <code>NULL</code>. <strong>Não é bug de gravação — é ausência de dado na origem.</strong> O e-mail da OLX simplesmente não carrega o identificador da conversa; ele não existe naquele payload. Por isso não adianta "corrigir o parser": sem <code>chatId</code>, não há conversa para responder.</p>
+
+<h2>Por que a aba de chat some — o erro exato</h2>
+
+<p>O envio de mensagem (<code>CrmIntegracaoController</code>, ~linha 847) exige o <code>chatId</code> do lead:</p>
+
+<pre><code>$chatId = $lead['olx_chat_id'] ?? null;
+if (empty($chatId)) {
+    return $this->getResponse()->setContent(json_encode([
+        "error" =&gt; true,
+        "msg"   =&gt; "Chat ID da OLX (chatId) não encontrado no lead para envio."
+    ]));
+}</code></pre>
+
+<p>Antes disso ainda há o guard de configuração:</p>
+
+<pre><code>if (!$olxConfig || empty($olxConfig[0]['token'])) {
+    throw new \Exception("Configuração OLX não encontrada ou Token de acesso está vazio para a filial.");
+}</code></pre>
+
+<p>São <strong>duas causas diferentes</strong> para "não consigo mandar mensagem", e as mensagens distinguem: <em>"Chat ID da OLX (chatId) não encontrado"</em> = lead veio por e-mail; <em>"Token de acesso está vazio"</em> = integração da filial não conectada (<code>/olx-crm</code> → <code>olxCrmConnect</code>).</p>
+
+<h2>O merge Zoho + chat</h2>
+
+<p>Quando os dois caminhos disparam para o mesmo contato (o comprador manda e-mail <em>e</em> abre chat), o webhook tenta reaproveitar o lead que o Zoho já criou, em vez de duplicar:</p>
+
+<pre><code>$paramsToFind = [
+    'status_id'      =&gt; $colunasIn,
+    'filial_id'      =&gt; $filialId,
+    'crm_lead_email' =&gt; trim($senderEmail),
+    'origem_id'      =&gt; 2
+];
+sleep(1);
+$findForZoho = $globalTable-&gt;getMagic('sis_crm_lead', ['crm_lead_id'], $paramsToFind);
+
+if (!empty($findForZoho)) {
+    $alreadyExistsByZoho = true;
+    $dataLead['id_lead'] = $findForZoho[0]["crm_lead_id"];
+    handleLog(true, 'chat_already_exists_zoho =&gt; ...', 'olx', 'chat_already_exists_zoho', ...);
+}</code></pre>
+
+<p>Com <code>id_lead</code> preenchido, <code>saveLead()</code> entra no ramo de <strong>UPDATE</strong> (<code>$this->update($data, 'crm_lead_id = ' . $lead['id_lead'])</code>) em vez de INSERT — então o lead do Zoho <strong>recebe o <code>olx_chat_id</code> de volta</strong> e o chat passa a funcionar. É por isso que alguns leads de e-mail ganham chat depois.</p>
+
+<p>Dois pontos frágeis aqui, ambos reais:</p>
+
+<ul>
+<li><strong><code>sleep(1)</code></strong> — é uma espera cega para dar tempo de o webhook do Zoho terminar de gravar. Se o Zoho demorar mais que 1s, o merge não acontece e nasce um lead duplicado. Se for mais rápido, é 1 segundo de worker parado em toda mensagem de chat de lead novo.</li>
+<li><strong>A chave do merge é o e-mail.</strong> Se a OLX não mandar <code>email</code> no payload do chat (<code>$data['email'] ?? null</code>), <code>crm_lead_email</code> vai vazio, o <code>getMagic</code> não casa e o merge falha — duplicando.</li>
+</ul>
+
+<p>Quando o merge acontece (<code>$alreadyExistsByZoho === true</code>), a atribuição de responsável é <strong>pulada de propósito</strong> (<code>if ($filialCrmTipo &gt; 0 &amp;&amp; $alreadyExistsByZoho === false)</code>) — o lead já tem dono do fluxo do Zoho, não faz sentido redistribuir.</p>
+
+<h3>Como auditar</h3>
+
+<p>Os dois desfechos do merge geram log na mesma pasta/arquivo, mudando só o status:</p>
+
+<pre><code>pasta: olx | arquivo: chat_already_exists_zoho
+[OK]   = achou o lead do Zoho e fez merge
+[FAIL] = não achou, criou lead novo</code></pre>
+
+<p>Em produção esses logs estão no Papa Entulho (<code>logs_legacy_exceptions_custom</code>), com <code>expires_at</code> em <code>2026-04-30</code> nas chamadas atuais — vale conferir se ainda estão dentro da validade antes de contar com eles.</p>
+
+<h2>Envio de mensagem para a OLX</h2>
+
+<pre><code>POST https://apps.olx.com.br/autoservice/v1/chat/send
+Authorization: Bearer {olxToken}
+
+{
+  "textMessage": "...",
+  "messageId":   uniqid('olx_', true),
+  "chatId":      "{olx_chat_id do lead}"
+}</code></pre>
+
+<p>Só texto — não há upload de anexo nesse caminho (diferente do Meta, que tem etapa de <code>attachment_id</code>). O <code>messageId</code> é gerado localmente com <code>uniqid()</code>; o comentário no código observa que a OLX exige o campo mas gerencia o ID final.</p>
+
+<h2>Resumo para o suporte</h2>
+
+<ul>
+<li>Lead OLX <strong>sem aba de chat</strong> é o comportamento esperado quando ele veio por e-mail — hoje, ~2 em cada 3. Não é falha de configuração da filial.</li>
+<li>Lead OLX <strong>com chat</strong> tem <code>olx_chat_id</code> e <code>olx_anuncio_id</code> preenchidos. Para confirmar: consultar essas colunas em <code>sis_crm_lead</code>.</li>
+<li>"Token de acesso vazio" é outro problema: filial não conectada na OLX.</li>
+<li>Origem <code>55 olx-chat</code> existe em <code>sis_crm_origem</code>, mas <strong>o código não a usa</strong> — o webhook grava <code>origem_lead = 2</code>. Não filtre por 55 esperando achar os leads de chat.</li>
+</ul>

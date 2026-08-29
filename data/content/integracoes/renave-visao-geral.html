@@ -1,0 +1,69 @@
+<!--
+title: Renave - Visão Geral
+description: Visão geral da integração com o Renave.
+published: 1
+date: 2026-08-26T15:03:18.198Z
+tags: renave
+editor: ckeditor
+dateCreated: 2025-10-23T13:58:46.540Z
+-->
+
+<h2>DATASTOCK<br><br>Entendendo os Endpoints de API do Ambiente de Desenvolvimento (<code>-dev</code>)</h2>
+<p>&nbsp;</p>
+<p>Os links a seguir direcionam para a documentação técnica (Swagger UI) das APIs da plataforma Stok-e, hospedadas no ambiente de <strong>Desenvolvimento (</strong><code><strong>-dev</strong></code><strong>)</strong>. Este ambiente é dedicado a <strong>testes, homologação e desenvolvimento</strong> de novas funcionalidades.</p>
+<p><strong>⚠️ Importante:</strong> NUNCA utilize estes <i>endpoints</i> para operações com dados reais (produção).</p>
+<p>&nbsp;</p>
+<h3>Visão Geral dos Serviços</h3>
+<p>&nbsp;</p>
+<figure class="table">
+  <table>
+    <thead>
+      <tr>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Serviço</strong></th>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>URL do Swagger</strong></th>
+        <th style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Função Principal</strong></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Autenticação</strong></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><a href="https://autenticacao-dev.stok-e.com/swagger/index.html"><code>https://autenticacao-dev.stok-e.com/swagger/index.html</code></a></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Gerencia o <strong>acesso</strong> e a <strong>segurança</strong> de usuários e sistemas. (Ex: Login, Obter Token).</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>Cadastro</strong></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><a href="https://cadastro-dev.stok-e.com/swagger/index.html"><code>https://cadastro-dev.stok-e.com/swagger/index.html</code></a></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Gerencia o <strong>registro</strong> e a <strong>manutenção</strong> de entidades mestras. (Ex: Clientes, Usuários, Fornecedores).</td>
+      </tr>
+      <tr>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><strong>DMS</strong></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;"><a href="https://dms-dev.stok-e.com/swagger/index.html"><code>https://dms-dev.stok-e.com/swagger/index.html</code></a></td>
+        <td style="border-bottom:1px solid;border-left:1px solid;border-right:1px solid;border-top:1px solid;">Gerencia a <strong>manipulação de documentos</strong> e arquivos. (Ex: Upload de Notas Fiscais, Busca de Documentos).</td>
+      </tr>
+    </tbody>
+  </table>
+</figure>
+<p><br>Esses <i>endpoints</i> pertencem à plataforma <strong>ControlStock</strong>, que é uma solução da empresa <strong>DataStock Tecnologia e Serviços LTDA.</strong></p>
+<p>Os resultados da pesquisa mostram uma forte ligação entre o domínio <code>stok-e.com</code> e a <strong>DataStock/ControlStock</strong>:</p>
+<p>Um dos <i>snippets</i> encontrados para o cadastro da plataforma ControlStock aponta para o domínio: <code>https://www.stok-e.com/ControleAcesso/cadastro.cshtml</code>. Isso sugere que <code><strong>stok-e.com</strong></code><strong> é o domínio principal ou um domínio de apoio da ControlStock/DataStock</strong>.</p>
+<p>A <strong>DataStock</strong> é especializada em soluções para o mercado automotivo, com foco principal na <strong>gestão de estoque de veículos</strong> e na <strong>integração com o RENAVE</strong> (Registro Nacional de Veículos em Estoque). A DataStock faz parte do ecossistema da <strong>B3</strong> (Bolsa do Brasil).</p>
+<p>A estrutura das APIs que você forneceu (<code>autenticacao</code>, <code>cadastro</code>, <code>dms</code>) é típica de um sistema de gestão, como o <strong>ControlStock</strong>, que precisa gerenciar o login, o registro de clientes/veículos e, muito provavelmente, a documentação relacionada (DMS).</p>
+<p><strong>Em resumo, os </strong><i><strong>endpoints</strong></i><strong> de teste (</strong><code><strong>-dev</strong></code><strong>) que você está vendo fazem parte da plataforma de soluções ControlStock, desenvolvida pela DataStock, focada em gestão de estoque e integração com o RENAVE no setor automotivo.</strong><br><br><strong>Breve explicação de fluxo:</strong><br>&nbsp;</p>
+<h4>1. Operação: <strong>ENTRADA</strong> (Compra/Aquisição do Veículo)</h4>
+<p>&nbsp;</p>
+<p><strong>Finalidade no RENAVE:</strong> Registrar o veículo no estoque da loja (revenda/concessionária) no sistema RENAVE.</p>
+<p><strong>Dados Necessários na Tela:</strong></p>
+<p><strong>CHAVE NFE:*:</strong> Refere-se à <strong>Nota Fiscal de Entrada</strong> que a loja gerou (ou recebeu) ao adquirir o veículo de um fornecedor (ou pessoa física). O RENAVE exige que essa NF-e esteja associada ao registro de entrada no estoque para fins de rastreabilidade e conformidade fiscal.</p>
+<p><strong>VALOR DA COMPRA:*:</strong> O valor pelo qual a loja adquiriu o veículo.</p>
+<p><strong>"Dados do Cliente"</strong> (Acima): Nesta fase de <strong>ENTRADA</strong>, os dados do "cliente" provavelmente se referem ao <strong>Fornecedor</strong> ou à pessoa que vendeu o veículo para a loja.</p>
+<p>&nbsp;</p>
+<h4>2. Operação: <strong>SAÍDA</strong> (Venda/Transferência do Veículo)</h4>
+<p>&nbsp;</p>
+<p><strong>Finalidade no RENAVE:</strong> Remover o veículo do estoque da loja e iniciar o processo de transferência de propriedade para o comprador final.</p>
+<p><strong>Dados Necessários na Tela:</strong></p>
+<p><strong>CHAVE NFE:*:</strong> Refere-se à <strong>Nota Fiscal de Saída</strong> (ou Nota Fiscal de Venda) emitida pela loja para o cliente/comprador. Esta é a prova fiscal da venda.</p>
+<p><strong>VALOR DA COMPRA:*:</strong> O valor pelo qual o veículo foi vendido ao cliente final.</p>
+<p><strong>"Dados do Cliente"</strong> (Acima): Nesta fase de <strong>SAÍDA</strong>, os dados se referem ao <strong>Comprador</strong> do veículo (o novo proprietário).<br><br><br><mark class="marker-yellow">[TESTES]</mark></p>
+<p>Podem usar as placas ATC0069, ATC0070, ATC0071, ATC0072, ATC0073, ATC0074, ATC0075, ATC0076, ATC0077, ATC0078, ATC0079, ATC0080, ATC0081, ATC0082, ATC0083, ATC0084, ATC0085, ATC0086, ATC0087, ATC0088, ATC0089, ATC0090, ATC0091, ATC0092, ATC0093, ATC0094, ATC0095, ATC0096, ATC0097, ATC0098, ATC0099</p>
+<p>todas com o renavam 11111111111 e númeroCRV 11111111111</p>
+<p>na&nbsp;loja&nbsp;Carlos&nbsp;Car (71.381.478/0001-57)<br><br><strong>Login: </strong>21718411000197<br><strong>Senha:</strong> SfV4?nY57gma<br>https://dev.stok-e.com/AreaRestrita/<br>&nbsp;</p>

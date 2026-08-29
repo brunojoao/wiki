@@ -1,0 +1,197 @@
+<!--
+title: Credere - MultiBanco Simulação
+description: Simulador e propostas de financiamento (MultiBanco / Credere).
+published: 1
+date: 2026-08-26T15:03:12.870Z
+tags: credere, financiamento, multi-banco
+editor: ckeditor
+dateCreated: 2026-06-26T19:23:29.075Z
+-->
+
+<h1>Credere / MultiBanco — Simulador e Propostas de Financiamento</h1>
+<p>Documentação técnica do módulo <strong>MultiBanco</strong> (integração com a <strong>Credere</strong> — <code>meucredere.com.br</code>), responsável por <strong>simulações</strong> e <strong>propostas de financiamento</strong> de veículos no <code>app.boomsistemas.com.br</code>.</p>
+<p>⚠️ <strong>Atenção, dev novo:</strong> ao contrário do integrador legado de portais, este módulo é <strong>moderno e bem estruturado</strong>: usa <strong>Guzzle V7</strong>, <strong>propriedades tipadas (PHP 7.4)</strong>, helper <code>Cache</code> (sessão), <strong>OAuth2 com refresh automático</strong> e <strong>webhooks</strong>. A nomenclatura externa é "MultiBanco"; o provedor por trás é a Credere.</p>
+<p>&nbsp;</p>
+
+<h2>1. Glossário</h2>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Termo</th><th style="border:1px solid;">Significado</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><strong>Simulação</strong></td><td style="border:1px solid;">Cálculo de condições de financiamento para um veículo + cliente. Criada no <strong>embed</strong> (iframe) da Credere.</td></tr>
+<tr><td style="border:1px solid;"><strong>Proposta</strong></td><td style="border:1px solid;">Container de envio de uma simulação aos bancos. Disponível apenas no plano <code>completo</code>.</td></tr>
+<tr><td style="border:1px solid;"><strong>Tentativa (proposal attempt)</strong></td><td style="border:1px solid;">Cada envio a um banco específico dentro de uma proposta (status, parcelas, juros, etc.).</td></tr>
+<tr><td style="border:1px solid;"><strong>Embed</strong></td><td style="border:1px solid;">Iframe hospedado pela Credere (<code>embed.meucredere.com.br</code>) onde o usuário preenche/lê a simulação.</td></tr>
+<tr><td style="border:1px solid;"><strong>Plano</strong></td><td style="border:1px solid;"><code>basico</code> (só simulação) ou <code>completo</code> (simulação + propostas). Coluna <code>credere_plan</code>.</td></tr>
+<tr><td style="border:1px solid;"><strong>Webhook</strong></td><td style="border:1px solid;">Eventos que a Credere envia ao nosso backend para sincronizar status de simulações/propostas.</td></tr>
+</tbody>
+</table></figure>
+<p>&nbsp;</p>
+
+<h2>2. Arquivos-chave</h2>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Arquivo</th><th style="border:1px solid;">Papel</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>Controller/MultiBancoController.php</code></td><td style="border:1px solid;"><strong>Núcleo do módulo.</strong> Dashboard, criação/visualização de simulações, geração da URL do embed, cliente HTTP Guzzle, OAuth2 (setup/refresh), sincronização.</td></tr>
+<tr><td style="border:1px solid;"><code>Controller/MultiBancoFilialConfigController.php</code></td><td style="border:1px solid;"><strong>Configuração por filial</strong>: salvar tokens/plano/store_id, testar/renovar tokens, backup e exclusão de dados.</td></tr>
+<tr><td style="border:1px solid;"><code>Controller/ApiController.php</code> → <code>credereAction()</code></td><td style="border:1px solid;"><strong>Endpoint de webhook</strong> (<code>/webhook/credere/:webhook_token</code>). Mapeia evento → handler.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/MultiBancoTable.php</code></td><td style="border:1px solid;">Table Gateway das simulações, propostas, tentativas, bancos aprovados e log de webhooks.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/MultiBancoFilialConfigTable.php</code></td><td style="border:1px solid;">Table Gateway de <code>sis_filial_multibanco_config</code> (config + tokens por filial) + backup/exclusão.</td></tr>
+<tr><td style="border:1px solid;"><code>Helpers/CredereHelper.php</code></td><td style="border:1px solid;"><strong>Regras de negócio</strong>: constantes de eventos, mapeamento de status Credere→interno, melhores bancos, análise de aprovação.</td></tr>
+<tr><td style="border:1px solid;"><code>config/constants.php</code></td><td style="border:1px solid;">URLs base da API e do embed.</td></tr>
+<tr><td style="border:1px solid;"><code>view/application/multi-banco/*.phtml</code></td><td style="border:1px solid;">Telas: <code>index</code>, <code>nova-simulacao</code>, <code>simulador</code> (embed), <code>visualizar-simulacao</code>, <code>proposta</code>, <code>editar-proposta</code>, <code>visualizar-proposta</code>, <code>contratacao</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>view/application/multi-banco-filial-config/index.phtml</code></td><td style="border:1px solid;">Tela de configuração do módulo na filial.</td></tr>
+<tr><td style="border:1px solid;"><code>public/js/modules/multi-banco/*.js</code></td><td style="border:1px solid;">Front: <code>multibanco.js</code>, <code>actions.js</code>, <code>tables.js</code>, <code>filters.js</code>, <code>utils.js</code>.</td></tr>
+</tbody>
+</table></figure>
+<p>&nbsp;</p>
+
+<h2>3. URLs e cliente HTTP</h2>
+<p>Definidas em <code>config/constants.php</code>:</p>
+<pre><code class="language-php">define('CREDERE_API_BASE_URL', 'https://app.meucredere.com.br/api/v1/');
+define('CREDERE_EMBED_BASE_URL', 'https://embed.meucredere.com.br/');</code></pre>
+<p>O cliente HTTP é um <strong>Guzzle V7</strong> (<code>GuzzleHttpV7\Client</code>) criado em <code>createHttpClient()</code> (~linha 2083) com <code>base_uri =&gt; CREDERE_API_BASE_URL</code> e um <code>HandlerStack</code> com middlewares. Atribuído a <code>$this-&gt;httpClient</code> no construtor.</p>
+<p>O <strong>embed</strong> (iframe) aponta para:</p>
+<ul>
+<li><code>CREDERE_EMBED_BASE_URL . "simulations/form"</code> → criar/preencher simulação</li>
+<li><code>CREDERE_EMBED_BASE_URL . "simulations/read"</code> → ler simulação existente</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>4. Configuração por filial (onde se configura)</h2>
+<p>Tudo é configurado <strong>por filial</strong>, na tabela <code>sis_filial_multibanco_config</code>, pela tela do <code>MultiBancoFilialConfigController</code>. A flag <code>sis_filial.filial_fl_multibanco</code> liga/desliga o módulo.</p>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Coluna</th><th style="border:1px solid;">Uso</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>filial_id</code></td><td style="border:1px solid;">Filial dona da configuração.</td></tr>
+<tr><td style="border:1px solid;"><code>credere_plan</code></td><td style="border:1px solid;"><code>basico</code> | <code>completo</code> (libera propostas).</td></tr>
+<tr><td style="border:1px solid;"><code>credere_access_token</code> / <code>credere_refresh_token</code> / <code>token_expires_at</code></td><td style="border:1px solid;">Token <strong>embed</strong> (simulações).</td></tr>
+<tr><td style="border:1px solid;"><code>credere_proposals_access_token</code> / <code>credere_proposals_refresh_token</code> / <code>proposals_token_expires_at</code></td><td style="border:1px solid;">Token <strong>proposals</strong> (propostas e chamadas de API).</td></tr>
+<tr><td style="border:1px solid;"><code>credere_store_id</code></td><td style="border:1px solid;">ID da loja na Credere (header <code>Store-Id</code>).</td></tr>
+<tr><td style="border:1px solid;"><code>webhook_token</code></td><td style="border:1px solid;">Segredo que valida a URL de webhook desta filial.</td></tr>
+<tr><td style="border:1px solid;"><code>last_backup_at</code></td><td style="border:1px solid;">Timestamp do último backup (exigido antes de exclusão em massa).</td></tr>
+</tbody>
+</table></figure>
+<p><strong>Actions de config</strong> (<code>MultiBancoFilialConfigController</code>): <code>salvarAction()</code>, <code>deletarAction()</code>, <code>testarTokensAction()</code>, <code>renovarTokensAction()</code>, <code>resumoDadosAction()</code>, <code>dadosCompletosJsonAction()</code>, <code>registrarBackupAction()</code>, <code>excluirDadosAction()</code> (delete cascata, só com backup recente).</p>
+<p>&nbsp;</p>
+
+<h2>5. Autenticação OAuth2 (dois tokens + refresh automático)</h2>
+<p>O módulo opera com <strong>dois tokens distintos</strong> por filial: <strong>embed</strong> (limitado) e <strong>proposals</strong> (completo). A escolha é feita em <code>getTokenForEndpoint()</code> (~2102):</p>
+<ul>
+<li>Chamadas de <strong>API</strong> (endpoint ≠ <code>get-embed-url</code>) sempre usam o <strong>proposals token</strong>.</li>
+<li>Para gerar a URL do <strong>embed</strong>: usuário <strong>master</strong> recebe o proposals token; demais dependem da permissão <code>view_bank_return</code> (com permissão → proposals; sem → embed token).</li>
+</ul>
+<p>Carregamento e validação (em <code>setup()</code>, ~83):</p>
+<pre><code class="language-plaintext">setup()
+  ├─ checkPermission(userId, filiais)                 // autoriza acesso ao módulo
+  ├─ Cache "multibanco_loja_config" (TTL_LONG, sessão)
+  │     └─ filialConfigByFilialId() → tokens, store_id, plano
+  ├─ isTokenValid(token_expires_at)                   // DateTime vs now (America/Sao_Paulo)
+  └─ popula $credereAccessToken, $credereProposalsAccessToken, $credereStoreId, $planoCliente</code></pre>
+<p><strong>Toda chamada à API passa por <code>requestJson($method, $endpoint, $options)</code></strong> (~2131), que injeta os headers padrão:</p>
+<pre><code class="language-plaintext">Authorization: Bearer {token apropriado}   // via getTokenForEndpoint()
+Store-Id: {credereStoreId}
+Accept: application/json</code></pre>
+<p><strong>Refresh automático:</strong> se a resposta for <code>401</code> ou <code>403</code>, o <code>requestJson()</code>:</p>
+<ol>
+<li>descobre se o token usado era <code>proposals</code> ou <code>embed</code>;</li>
+<li>pega o refresh token correspondente do config;</li>
+<li>chama <code>performTokenRefresh($refreshToken, $tokenType, $filialId)</code> (~156) → <code>POST token</code> com <code>grant_type=refresh_token</code> (usa o Guzzle direto, <strong>não</strong> o <code>requestJson</code>, para evitar loop);</li>
+<li>persiste os novos tokens (<code>MultiBancoFilialConfigTable::updateTokens()</code>) + atualiza cache de sessão;</li>
+<li><strong>repete</strong> a requisição original. Há trava <code>$refreshAttempted[$tipo_filial]</code> para não tentar refresh duas vezes no mesmo request.</li>
+</ol>
+<p>&nbsp;</p>
+
+<h2>6. Fluxo: criar uma simulação</h2>
+<pre><code class="language-plaintext">1. /multi-banco/nova-simulacao  (novaSimulacaoAction)
+      └─ usuário escolhe veículo (searchVehicles/getVehicleDetails) + cliente (searchCustomers/getClientDetails)
+2. Backend monta a URL do embed (getTokenForEndpoint('get-embed-url'))
+      └─ iframe: CREDERE_EMBED_BASE_URL + "simulations/form"
+3. Usuário completa a simulação dentro do iframe da Credere
+4. Front faz POST → criarSimulacaoApiAction com o simulation.uuid
+      └─ INSERT em:
+           sis_simulacoes_financiamento          (registro principal)
+           sis_veiculo_simulacao_financiamento    (snapshot do veículo)
+           sis_lead_simulacao_financiamento       (snapshot do lead/cliente)
+5. enrichSimulationWithApiData() / fetchSimulation(uuid)  // puxa dados completos da API
+6. Retorna JSON → front redireciona para /multi-banco/visualizar/{id}</code></pre>
+<p><strong>Sincronização manual:</strong> <code>sincronizarSimulacoesAction()</code> percorre simulações pendentes (<code>simulationNeedsApiUpdate()</code>), chama <code>fetchSimulation()</code> e grava via <code>updateSimulationWithApiData()</code>, recalculando o <code>approval_status</code>.</p>
+<p>&nbsp;</p>
+
+<h2>7. Webhooks (sincronização vinda da Credere)</h2>
+<p><strong>Rota</strong> (<code>module.config.php</code> ~3290, força HTTPS):</p>
+<pre><code class="language-plaintext">POST /webhook/credere/:webhook_token  →  ApiController::credereAction()</code></pre>
+<p><code>credereAction()</code> (~779): valida o <code>:webhook_token</code> via <code>MultiBancoTable::filialConfigByWebhookToken()</code>, extrai <code>event</code> + payload, resolve o handler pelo mapa e executa. Todo webhook é logado em <code>sis_credere_webhook</code> para auditoria.</p>
+<p><strong>Mapa evento → handler</strong> (<code>ApiController::CREDERE_WEBHOOK_HANDLER_MAP</code>, ~18):</p>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Evento (CredereHelper)</th><th style="border:1px solid;">Handler</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>PROCESSED_SIMULATION</code></td><td style="border:1px solid;"><code>processSimulation</code></td></tr>
+<tr><td style="border:1px solid;"><code>PROPOSAL_CREATED</code> / <code>PROPOSAL_UPDATED</code> / <code>PROPOSAL_STATUS_UPDATED</code></td><td style="border:1px solid;"><code>createProposal</code> / <code>updateProposal</code> / <code>updateProposalStatus</code></td></tr>
+<tr><td style="border:1px solid;"><code>PROPOSAL_ATTEMPT_CREATED</code> / <code>_UPDATED</code> / <code>_STATUS_UPDATED</code> / <code>_SYNCED_CONDITION</code></td><td style="border:1px solid;"><code>createProposalAttempt</code> / <code>updateProposalAttempt</code> / <code>updateProposalAttemptStatus</code> / <code>syncProposalCondition</code></td></tr>
+<tr><td style="border:1px solid;"><code>CUSTOMER_CREATED</code> / <code>CUSTOMER_UPDATED</code></td><td style="border:1px solid;"><code>processCustomer</code></td></tr>
+</tbody>
+</table></figure>
+<p>O <code>processSimulation()</code> grava a simulação e seus snapshots de veículo/lead, e define o <code>approval_status</code> usando <code>CredereHelper::analyseSimulation()</code>.</p>
+<p>&nbsp;</p>
+
+<h2>8. CredereHelper — regras de negócio</h2>
+<p>Centraliza a lógica que não depende de I/O:</p>
+<ul>
+<li><strong>Constantes de evento</strong> + <code>isValid()</code> / <code>getPayloadKey()</code> (mapeia evento → chave do payload JSON).</li>
+<li><code>mapCredereStatusToInternal()</code> — converte o status da Credere para o status interno, com metadata (<code>priority</code>, <code>is_final</code>, <code>is_success</code>).</li>
+<li><code>analyseSimulation()</code> — <code>true</code> se há banco com <code>pre_approval_status &gt;= 2</code> e <code>available = true</code> (define se a simulação tem chances).</li>
+<li><code>bestBanks()</code> — retorna até 5 bancos com melhores condições (menor juros / parcela).</li>
+<li><code>isSuccessStatus()</code>, <code>isFinalStatus()</code>, <code>normalizeStatusInput()</code> (remove acentos), <code>getAllStatusByPriority()</code>.</li>
+</ul>
+<p><strong>Status interno</strong> (do menor ao maior): <code>checagem</code> → <code>em_analise</code> → <code>pendente</code> → <code>pre_aprovada</code> → <code>aprovada</code> → <code>faturada</code>; e os finais negativos <code>recusada</code>, <code>recusada_restricao</code>, <code>desistencia</code>.</p>
+<p>&nbsp;</p>
+
+<h2>9. Mapa de tabelas</h2>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">Tabela</th><th style="border:1px solid;">Conteúdo</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>sis_filial_multibanco_config</code></td><td style="border:1px solid;">Config + tokens + store_id + plano + webhook_token por filial.</td></tr>
+<tr><td style="border:1px solid;"><code>sis_simulacoes_financiamento</code></td><td style="border:1px solid;">Simulação (uuid, filial_id, created_by, status, approval_status, success, down_payment, referenced_vehicle_id, referenced_client_id, deleted_at).</td></tr>
+<tr><td style="border:1px solid;"><code>sis_veiculo_simulacao_financiamento</code></td><td style="border:1px solid;">Snapshot do veículo da simulação.</td></tr>
+<tr><td style="border:1px solid;"><code>sis_lead_simulacao_financiamento</code></td><td style="border:1px solid;">Snapshot do lead/cliente (CPF/CNPJ, renda, ocupação, endereço, etc.).</td></tr>
+<tr><td style="border:1px solid;"><code>sis_propostas_financiamento</code></td><td style="border:1px solid;">Proposta (credere_proposal_id, dados de customer/vehicle/store/seller em JSON).</td></tr>
+<tr><td style="border:1px solid;"><code>sis_proposal_attempts</code></td><td style="border:1px solid;">Tentativa por banco (status, valores em cents, parcelas, condições financeiras em JSON).</td></tr>
+<tr><td style="border:1px solid;"><code>sis_simulacoes_financiamento_approved_banks</code></td><td style="border:1px solid;">Bancos aprovados por simulação (por código FEBRABAN).</td></tr>
+<tr><td style="border:1px solid;"><code>sis_credere_webhook</code></td><td style="border:1px solid;">Log de webhooks recebidos (event, body JSON, received_at).</td></tr>
+<tr><td style="border:1px solid;"><code>sis_multibanco_user_permissions</code></td><td style="border:1px solid;">Permissões de vendedor por filial (<code>manage_sellers</code>, <code>view_bank_return</code>).</td></tr>
+</tbody>
+</table></figure>
+<p>FKs externas: <code>sis_user</code> (created_by), <code>sis_filial</code> (filial_id + flag <code>filial_fl_multibanco</code>), <code>sis_veiculo</code> (referenced_vehicle_id), <code>sis_pessoa_cadastro</code> (referenced_client_id), <code>sis_banco</code> (por FEBRABAN).</p>
+<p>&nbsp;</p>
+
+<h2>10. Permissões</h2>
+<ul>
+<li><strong>Master</strong>: <code>grupo_acesso_id != 3</code> — acesso total (sempre recebe o proposals token).</li>
+<li><code>manage_sellers</code> — gerenciar vendedores autorizados.</li>
+<li><code>view_bank_return</code> — ver o retorno bancário no embed (define qual token entra na URL do embed).</li>
+<li>Permissões ficam em <code>sis_multibanco_user_permissions</code> e são cacheadas em sessão (<code>multibanco_user_{user_id}_*</code>).</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>11. Rotas e factories</h2>
+<pre><code class="language-plaintext"># Rotas (module.config.php)
+/multi-banco[/:action]              → Application\Controller\MultiBanco        (~3396)
+/webhook/credere[/:webhook_token]   → Application\Controller\Api::credere (https) (~3290)
+# config da filial                  → Application\Controller\MultiBancoFilialConfig (~647)
+
+# Factories (Module.php ~578)
+'multibanco-table'                 → new MultiBancoTable($adapter)
+'multibanco-filial-config-table'   → new MultiBancoFilialConfigTable($adapter)</code></pre>
+<p>&nbsp;</p>
+
+<h2>12. Pontos de atenção para um novo dev</h2>
+<ul>
+<li><strong>Nunca chame a API montando token na mão</strong> — use <code>requestJson()</code>; ele resolve token, headers e refresh.</li>
+<li><strong>Dois tokens</strong>: lembre que API = proposals token; embed pode usar embed token conforme permissão. Bugs de "401" quase sempre são token errado para o endpoint.</li>
+<li><strong>Config é por filial</strong>: ao testar, garanta que a filial tem <code>sis_filial_multibanco_config</code> preenchido, tokens válidos e <code>filial_fl_multibanco = 1</code>.</li>
+<li><strong>Webhooks são a fonte de verdade do status</strong>: a simulação/proposta evolui via <code>credereAction()</code>. Para reprocessar, consulte <code>sis_credere_webhook</code>.</li>
+<li><strong>Soft delete</strong>: simulações usam <code>deleted_at</code> — filtre por <code>deleted_at IS NULL</code> nas queries.</li>
+<li><strong>Exclusão em massa</strong> (<code>excluirDadosAction</code>) exige <strong>backup recente</strong> — não burlar.</li>
+<li><strong>Status</strong>: para qualquer regra de "aprovado/recusado/final", use <code>CredereHelper</code>, não compare strings na mão (há acentos e mapeamento).</li>
+<li><strong>Cache de sessão</strong>: config e permissões ficam em cache (<code>multibanco_loja_config</code>, <code>multibanco_user_permission</code>). Em mudanças de token/permissão, o cache precisa expirar/ser invalidado.</li>
+</ul>

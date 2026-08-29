@@ -1,0 +1,219 @@
+<!--
+title: Integrador - Portais de Veículos
+description: Arquitetura do módulo de integração com portais de veículos.
+published: 1
+date: 2026-08-26T15:03:15.598Z
+tags: arquitetura, integrador, veiculos
+editor: ckeditor
+dateCreated: 2026-06-26T19:09:21.328Z
+-->
+
+<h1>Integrador de Portais de Veículos — Arquitetura Técnica</h1>
+<p>Esta página documenta tecnicamente como funciona o módulo de integração com portais de veículos (OLX, iCarros, Webmotors, Mercado Livre, Mobiauto, Boom, etc.) no projeto <code>app.boomsistemas.com.br</code> (<strong>Zend Framework 2 / PHP 7.x</strong>): arquitetura, arquivos, funções, tabelas, onde se configura e como adicionar um novo portal.</p>
+<p>&nbsp;</p>
+
+<h2>1. Visão geral da arquitetura</h2>
+<p>O integrador <strong>não usa Strategy Pattern</strong>. A lógica é centralizada em <strong>dois grandes <code>if/else</code> em cascata</strong>, distribuídos em duas camadas:</p>
+<figure class="table"><table>
+<thead><tr>
+<th style="border:1px solid;"><strong>Camada</strong></th>
+<th style="border:1px solid;"><strong>Onde fica</strong></th>
+<th style="border:1px solid;"><strong>Responsabilidade</strong></th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="border:1px solid;"><strong>App</strong></td>
+<td style="border:1px solid;"><code>module/Application/src/Application/Model/VeiculoIntegracaoTable.php</code></td>
+<td style="border:1px solid;">Orquestra: monta o payload de cada portal (<code>geraData&lt;Portal&gt;()</code>), chama a camada Utils e persiste o resultado em <code>sis_veiculo_integracao</code>.</td>
+</tr>
+<tr>
+<td style="border:1px solid;"><strong>Utils</strong></td>
+<td style="border:1px solid;"><code>vendor/Utils/src/Utils/Integracao/Integracao.php</code></td>
+<td style="border:1px solid;">Executa a chamada HTTP/SOAP/SDK contra a API externa de cada portal (<code>Integrador&lt;Portal&gt;()</code>).</td>
+</tr>
+</tbody>
+</table></figure>
+<p>Fluxo macro:</p>
+<pre><code class="language-plaintext">[Camada App]                                      [Camada Utils]
+VeiculoIntegracaoTable::saveIntegracao()  ──────► Utils\Integracao\Integracao (construtor)
+  └─ if/else por integrador (~25 portais)            └─ if/else por $class → Integrador&lt;Portal&gt;()
+       └─ geraData&lt;Portal&gt;()  (monta payload)             └─ chama API externa (curl / SOAP / SDK)
+       └─ new Integracao($data, $filial, 'class')         └─ getResult() / getError()
+       └─ INSERT/UPDATE em sis_veiculo_integracao</code></pre>
+<p>&nbsp;</p>
+
+<h2>2. Arquivos-chave</h2>
+<figure class="table"><table>
+<thead><tr>
+<th style="border:1px solid;"><strong>Arquivo</strong></th>
+<th style="border:1px solid;"><strong>Papel</strong></th>
+</tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>Controller/IntegracaoController.php</code></td><td style="border:1px solid;">Ponto de entrada AJAX. <code>sendAction()</code> recebe POST e chama <code>saveIntegracao()</code>. Também trata callbacks OAuth (<code>olxAction</code>, <code>mercadolibreAction</code>).</td></tr>
+<tr><td style="border:1px solid;"><code>Model/VeiculoIntegracaoTable.php</code></td><td style="border:1px solid;"><strong>Orquestrador central (App).</strong> Métodos: <code>saveIntegracao()</code> (o grande if/else, ~linhas 190-602), <code>processIntegracoes()</code> (loop por integrador, ~1598-1622), <code>geraData&lt;Portal&gt;()</code>, <code>getIntegracoesVeiculos()</code>, <code>getIntegracao()</code>, <code>getByVeiculoId()</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/VeiculoIntegracaoCheckTable.php</code></td><td style="border:1px solid;">Fila assíncrona. <code>checkIntegracoes()</code>, <code>saveCheck()</code>, <code>sendCheck()</code>, <code>validaCheck()</code>, <code>clearCheck()</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/IntegradorTable.php</code></td><td style="border:1px solid;">Table Gateway de <code>sis_integrador</code> (lista master de portais). <code>getAll()</code>, <code>getIntegrador()</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/IntegracaoUserTable.php</code></td><td style="border:1px solid;">Table Gateway de <code>sis_integrador_user</code> (credenciais por usuário/portal). <code>getAll()</code>, <code>getUserIntegracao()</code>, <code>getUserIntegracaoVeiculo()</code>, <code>saveIntegracao()</code>, <code>deleteIntegracoes()</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>Controller/UsuarioController.php</code></td><td style="border:1px solid;"><code>editAction()</code> carrega integrações; <code>saveAction()</code> persiste credenciais (somente admin).</td></tr>
+<tr><td style="border:1px solid;"><code>view/application/usuario/integracao.phtml</code></td><td style="border:1px solid;"><strong>View das credenciais por portal</strong> (incluída no <code>editar.phtml</code> via <code>$this-&gt;partial('usuario/integracao')</code>).</td></tr>
+<tr><td style="border:1px solid;"><code>vendor/Utils/src/Utils/Integracao/Integracao.php</code></td><td style="border:1px solid;"><strong>Orquestrador da camada Utils.</strong> Construtor faz if/else por <code>$class</code>. Helpers: <code>getResult()</code>, <code>getError()</code>, <code>getRetornoFotos()</code>, <code>callAPI()</code>.</td></tr>
+<tr><td style="border:1px solid;"><code>Model/OlxTable.php</code>, <code>IcarrosTable.php</code>, <code>WebmotorsTable.php</code>, <code>MobiautoTable.php</code>, <code>UsadosBrTable.php</code>...</td><td style="border:1px solid;">Table Gateways de <strong>lookup/de-para</strong> (marca→código, modelo→código, etc.). Não enviam dados — só traduzem.</td></tr>
+<tr><td style="border:1px solid;"><code>Module.php</code></td><td style="border:1px solid;">Service Manager <code>factories</code> — registra todos os <code>*-table</code> (ex: <code>veiculointegracao-table</code>).</td></tr>
+<tr><td style="border:1px solid;"><code>config/module.config.php</code></td><td style="border:1px solid;">Rotas: <code>/integracao/send</code>, <code>/api/check-integracao/id/:id</code>, etc.</td></tr>
+</tbody>
+</table></figure>
+<p>&nbsp;</p>
+
+<h2>3. Tabelas do banco</h2>
+<p>As tabelas são <strong>genéricas</strong> — servem para todos os portais. A chave que identifica cada portal é a string <code>integrador_class</code> / <code>integrador_chave</code> (ex: <code>'olx'</code>, <code>'webmotors'</code>, <code>'boom'</code>).</p>
+<figure class="table"><table>
+<thead><tr>
+<th style="border:1px solid;"><strong>Tabela</strong></th>
+<th style="border:1px solid;"><strong>Função</strong></th>
+<th style="border:1px solid;"><strong>Colunas relevantes</strong></th>
+</tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>sis_integrador</code></td><td style="border:1px solid;">Lista master dos portais disponíveis.</td><td style="border:1px solid;"><code>integrador_id</code>, <code>integrador_descricao</code>, <code>integrador_class</code>, <code>integrador_status</code>, <code>integrador_order</code></td></tr>
+<tr><td style="border:1px solid;"><code>sis_integrador_user</code></td><td style="border:1px solid;">Credenciais de cada portal por usuário. <strong>É aqui que ficam tokens/chaves "espalhados" no usuário.</strong></td><td style="border:1px solid;"><code>integrador_chave</code>, <code>user_id</code>, <code>user_integracao</code>, <code>user_integracao_pass</code>, <code>user_integracao_token</code>, <code>user_integracao_refresh_token</code>, <code>user_integracao_token_expires</code>, <code>user_integracao_codigo</code>, <code>user_integracao_site</code>, <code>user_integracao_cep</code>, <code>user_integracao_tel</code>, <code>external_user_id</code></td></tr>
+<tr><td style="border:1px solid;"><code>sis_veiculo_integracao</code></td><td style="border:1px solid;">Estado de cada veículo em cada portal (ativo/removido + id do anúncio externo).</td><td style="border:1px solid;"><code>veiculo_id</code>, <code>integrador_class</code>, <code>veiculo_integracao_status</code> (0=removido, 1=ativo), <code>veiculo_integracao_codigo</code> (id do anúncio no portal), <code>veiculo_integracao_chave</code>, <code>veiculo_integracao_url</code>, <code>veiculo_integracao_erro</code>, <code>veiculo_integracao_fotos_id</code>, <code>veiculo_integracao_params</code>, <code>veiculo_integracao_update</code></td></tr>
+<tr><td style="border:1px solid;"><code>sis_veiculo_integracao_check</code></td><td style="border:1px solid;">Fila de processamento assíncrono.</td><td style="border:1px solid;"><code>veiculo_id</code>, <code>veiculo_integracao_check_operacao</code> <code>enum('insert','update','delete')</code>, <code>veiculo_integracao_check_data</code></td></tr>
+</tbody>
+</table></figure>
+<p>Tabelas de <strong>lookup por portal</strong> (de-para de marca/modelo/combustível/opcional): <code>sis_olx_marca</code>, <code>sis_olx_modelo</code>, <code>sis_icarros_marca</code>, <code>sis_webmotors_marca</code>, <code>sis_mobiauto_marca</code>, etc. Consumidas pelos respectivos <code>*Table.php</code>.</p>
+<p>&nbsp;</p>
+
+<h2>4. Códigos de status</h2>
+<p>O campo <code>status</code> que trafega em <code>saveIntegracao()</code> controla a operação:</p>
+<figure class="table"><table>
+<thead><tr><th style="border:1px solid;">status</th><th style="border:1px solid;">Significado</th></tr></thead>
+<tbody>
+<tr><td style="border:1px solid;"><code>0</code></td><td style="border:1px solid;"><strong>Excluir / remover</strong> do portal (desvincular)</td></tr>
+<tr><td style="border:1px solid;"><code>1</code></td><td style="border:1px solid;"><strong>Inserir</strong> novo anúncio</td></tr>
+<tr><td style="border:1px solid;"><code>2</code></td><td style="border:1px solid;"><strong>Editar</strong> anúncio existente</td></tr>
+</tbody>
+</table></figure>
+<p>Já em <code>sis_veiculo_integracao.veiculo_integracao_status</code> e na fila <code>sis_veiculo_integracao_check</code>, o estado final é binário (0=removido/inativo, 1=ativo) — a operação <code>delete</code> da fila é convertida em <code>status=0</code> no <code>ApiController</code>.</p>
+<p>&nbsp;</p>
+
+<h2>5. Fluxo de disparo (manual / por veículo)</h2>
+<p>Quando o usuário publica/edita/remove um veículo num portal pela tela, é disparado um POST para a rota <code>/integracao/send</code>:</p>
+<pre><code class="language-plaintext">POST /integracao/send
+{
+  integrador: "olx",      // integrador_class do portal
+  veiculo_id: 123,
+  status: 1,              // 0=excluir, 1=inserir, 2=editar
+  veiculo_integracao_codigo: null,   // id do anúncio (para update/delete)
+  params: {}
+}
+        │
+        ▼
+IntegracaoController::sendAction()
+        │
+        ▼
+VeiculoIntegracaoTable::saveIntegracao($_POST)
+        │  ── if/else por integrador ──
+        ├─ 'boom'        → geraXml()           → new Integracao(..., 'boom')        → SOAP
+        ├─ 'olx'         → geraDataOlx()        → new Integracao(..., 'olx')         → REST/OLX
+        ├─ 'mercadolivre'→ geraDataMercadoLivre()→ new Integracao(..., 'mercadolivre')→ SDK Meli
+        ├─ 'icarros'     → geraDataIcarros()    → new Integracao(..., 'icarros')     → REST
+        ├─ 'webmotors'   → geraDataWebmotors()  → new Integracao(..., 'webmotors')   → SOAP
+        ├─ 'mobiauto'    → MobiautoTable::geraDataMobi() → ...                        → REST
+        └─ ... (~25 portais)
+        │
+        ▼
+INSERT/UPDATE em sis_veiculo_integracao (status, codigo, url, erro, update)
+        │
+        ▼
+JSON de retorno para o front</code></pre>
+<p>&nbsp;</p>
+
+<h2>6. Onde se configura (credenciais no cadastro do usuário)</h2>
+<p>O desenvolvedor original "espalhou" as credenciais de portal <strong>dentro do cadastro de usuário</strong>. Cada portal tem um bloco de campos na view <code>usuario/integracao.phtml</code>, com <code>name</code> no padrão <strong>array indexado pela chave do portal</strong>:</p>
+<pre><code class="language-plaintext">integrador[&lt;class&gt;]                    -> checkbox liga/desliga a integração
+user_integracao[&lt;class&gt;]               -> usuário / ID / token / cód. loja (varia)
+user_integracao_pass[&lt;class&gt;]          -> senha / secret
+user_integracao_token[&lt;class&gt;]         -> access token (OAuth)
+user_integracao_refresh_token[&lt;class&gt;] -> refresh token (OAuth)
+user_integracao_token_expires[&lt;class&gt;] -> expiração do token
+user_integracao_codigo[&lt;class&gt;]        -> código da loja / revenda
+user_integracao_site[&lt;class&gt;]          -> URL do site
+user_integracao_cep[&lt;class&gt;]           -> CEP customizado (variantes OLX)
+user_integracao_tel[&lt;class&gt;]           -> telefone customizado (variantes OLX)
+external_user_id[&lt;class&gt;]              -> ID externo (Mercado Livre)</code></pre>
+<p><strong>Persistência:</strong> <code>UsuarioController::saveAction()</code> chama <code>IntegracaoUserTable::saveIntegracao($_POST, $user_id)</code>. Importante:</p>
+<ul>
+<li>Apenas <strong>admin</strong> (<code>grupo_acesso_id == 1</code>) pode salvar integrações.</li>
+<li>A gravação é <strong>"drop &amp; re-insert"</strong>: deleta todas as integrações do usuário e reinsere a partir do <code>$_POST['integrador']</code>.</li>
+<li>Se o usuário for desativado (<code>user_status == 0</code>), todas as integrações são apagadas via <code>deleteIntegracoes()</code>.</li>
+<li>Para OLX/iCarros sem token, <code>saveAction()</code> redireciona para o fluxo OAuth (container de sessão guarda <code>retorno</code>, <code>user_id</code> e <code>class</code>).</li>
+</ul>
+<p><strong>Leitura na hora do envio:</strong> <code>IntegracaoUserTable::getUserIntegracaoVeiculo('&lt;class&gt;', $veiculo_id)</code> devolve as credenciais já casadas com o veículo.</p>
+<p>&nbsp;</p>
+
+<h2>7. Rotina pesada de desvinculação (após venda)</h2>
+<p>Quando um veículo é vendido, o sistema percorre <strong>todos os portais ativos do veículo</strong> para remover os anúncios. É a operação mais pesada do módulo, e roda de forma <strong>assíncrona</strong>:</p>
+<pre><code class="language-plaintext">VeiculoController::vendaAction()                         (~linha 745)
+   └─ veiculointegracao-table->checkIntegracoes($veiculo_id, 0)   // status 0 = remover
+        └─ VeiculoIntegracaoCheckTable::checkIntegracoes()        (~1577-1596)
+             ├─ saveCheck(['veiculo_id', 'operacao'=>'delete'])  → INSERT na fila
+             └─ sendCheck() → HTTP GET /api/check-integracao/id/boom?veiculo_id=X  (async)
+                  └─ ApiController::checarIntegracaoAction()       (~674-712)
+                       ├─ sleep(5); ignore_user_abort(true)
+                       ├─ clearCheck()
+                       ├─ $operacao = (operacao == 'delete' ? 0 : 1)
+                       └─ VeiculoIntegracaoTable::processIntegracoes($veiculo_id, 0)  (~1598-1622)
+                            └─ foreach (integrações ativas do veículo) {
+                                  try { saveIntegracao(status=0) }
+                                  catch (Exception $e) { continue }   // não trava os demais
+                               }</code></pre>
+<p><strong>Ponto crítico:</strong> <code>processIntegracoes()</code> é <strong>genérico</strong> — itera sobre o <code>integrador_class</code> gravado em <code>sis_veiculo_integracao</code> (JOIN com <code>sis_integrador_user</code>). Ou seja, qualquer portal entra automaticamente nesse loop assim que existir o branch correspondente em <code>saveIntegracao()</code> e o veículo tiver registro ativo. O <code>try/catch</code> com <code>continue</code> garante que a falha de um portal não impede a desvinculação dos demais nem trava a venda.</p>
+<p>&nbsp;</p>
+
+<h2>8. Camada Utils — execução da chamada externa</h2>
+<p>O construtor de <code>Utils\Integracao\Integracao</code> recebe <code>($Data, $filial, $class)</code> e faz outro <code>if/else</code> por <code>$class</code>, delegando para um método privado por portal:</p>
+<pre><code class="language-plaintext">function __construct($Data, $filial, $class) {
+    if ($class == 'boom')              $this-&gt;IntegradorBoom();        // SOAP
+    else if ($class == 'olx')          $this-&gt;IntegradorOlx();
+    else if ($class == 'mercadolivre') $this-&gt;IntegradorMercadoLivre(); // SDK Meli
+    else if ($class == 'icarros')      $this-&gt;IntegradorIcarros();
+    else if ($class == 'webmotors')    $this-&gt;IntegradorWebmotors();    // SOAP
+    else if ($class == 'chavesnamao')  $this-&gt;IntegradorChavesNaMao();
+    else if ($class == 'comprecar')    $this-&gt;IntegradorComprecar();
+    // ... demais portais
+}</code></pre>
+<ul>
+<li>Chaves/segredos vêm de variáveis de ambiente via <code>getenv()</code> (ex: <code>boomveiculos_id</code>, <code>mercadolivre_id</code>, <code>mercadolivre_secret</code>, <code>icarros_id</code>).</li>
+<li>URLs dos webservices são propriedades privadas da classe (ex: <code>$WebmotorsProdCarro</code>, <code>$ChavesnaMaoProd</code>).</li>
+<li><code>callAPI($url, $params, $header, $type, $resposta, $json)</code> é o helper cURL genérico (timeouts via <code>TIMEOUT_MEDIUM</code>, <code>CURLOPT_SSL_VERIFYPEER=false</code>). Portais com formato próprio têm helper dedicado (ex: <code>comprecarAPI()</code>).</li>
+<li>Resultado e erro são lidos via <code>getResult()</code> / <code>getError()</code> pela camada App.</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>9. Blindagem de erros</h2>
+<p>O módulo é frágil (muitas APIs externas), então a resiliência se apoia em três mecanismos já presentes:</p>
+<ul>
+<li><strong>Try/catch + <code>handleException()</code></strong>: cada <code>Integrador&lt;Portal&gt;()</code> envolve a I/O em try/catch e loga via <code>handleException($e, 'utils_integracao_&lt;portal&gt;', false)</code> (o <code>false</code> não relança a exceção).</li>
+<li><strong>Erro persistido, não propagado</strong>: falhas viram texto em <code>sis_veiculo_integracao.veiculo_integracao_erro</code> + <code>status=0</code>, sem quebrar o fluxo principal.</li>
+<li><strong>Loop tolerante</strong>: <code>processIntegracoes()</code> isola cada portal num <code>try/catch { continue }</code>.</li>
+<li><strong>Timeouts curtos</strong> no cURL para não pendurar o request principal.</li>
+</ul>
+<p>&nbsp;</p>
+
+<h2>10. Como adicionar um novo portal</h2>
+<p>Para um portal REST simples (sem tabelas de lookup), o esforço é:</p>
+<ol>
+<li><strong>Registrar</strong> o portal em <code>sis_integrador</code> (<code>INSERT</code> com <code>integrador_class = 'novoportal'</code>, descrição, status e order).</li>
+<li><strong>View</strong>: adicionar o bloco de campos do portal em <code>usuario/integracao.phtml</code> (campos <code>integrador[novoportal]</code>, <code>user_integracao[novoportal]</code>, etc.). A persistência em <code>IntegracaoUserTable::saveIntegracao()</code> normalmente já é genérica.</li>
+<li><strong>Camada App</strong>: adicionar branch <code>else if ($integracao['integrador'] == 'novoportal')</code> em <code>VeiculoIntegracaoTable::saveIntegracao()</code> + método <code>geraDataNovoPortal()</code> que monta o payload (usando <code>getByVeiculoId()</code> e <code>getUserIntegracaoVeiculo()</code>).</li>
+<li><strong>Camada Utils</strong>: adicionar <code>else if ($class == 'novoportal')</code> no construtor de <code>Integracao</code> + método <code>IntegradorNovoPortal()</code> que faz a chamada HTTP (modelar por <code>IntegradorChavesNaMao()</code> / <code>IntegradorComprecar()</code>).</li>
+<li><strong>Desvinculação na venda</strong>: nada a fazer — <code>processIntegracoes()</code> já é genérico.</li>
+<li>(Opcional) <strong>Lookup</strong>: se o portal exigir de-para de marca/modelo, criar tabelas <code>sis_novoportal_*</code> + um <code>NovoPortalTable</code> (modelar por <code>MobiautoTable</code>/<code>OlxTable</code>) e registrar a factory em <code>Module.php</code>.</li>
+</ol>
+<p>&nbsp;</p>
+<blockquote>
+<p>⚠️ <strong>Padrões obrigatórios:</strong> manter a string da <code>integrador_class</code> <strong>idêntica</strong> em todos os pontos (view, <code>sis_integrador</code>, <code>sis_integrador_user</code>, os 2 <code>if/else</code>). Servidor é <strong>PHP 7.x</strong> (sem sintaxe 8.0+). Todo bloco de controle deve usar chaves <code>{ }</code>.</p>
+</blockquote>
+<p>&nbsp;</p>
+
+<h2>11. Portais suportados (integrador_class)</h2>
+<p><code>site</code>, <code>integration-api</code>, <code>boom</code>, <code>olx</code>, <code>olx2</code>, <code>olx3</code>, <code>facebook</code>, <code>instagram</code>, <code>webmotors</code>, <code>mercadolivre</code>, <code>mercadolivre2</code>, <code>meucarronovo</code> (Na Pista), <code>icarros</code>, <code>icarros2</code>, <code>autoline</code>, <code>autoline2</code>, <code>mobiauto</code>, <code>mobiauto2</code>, <code>carrobauru</code>, <code>usadosbr</code>, <code>woocommerce</code>, <code>veiculoaqui</code>, <code>socarrao</code>, <code>socarrao2</code>, <code>litoralcar</code>, <code>catarinacarros</code>, <code>chavesnamao</code>, <code>comprecar</code>, <code>carrobrasil</code>, <code>rotacarro</code>, <code>levo</code>, <code>carrodopovo</code>, <code>karvi</code>, <code>pontonegocio</code>, <code>carrosvale</code>.</p>

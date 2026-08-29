@@ -1,0 +1,54 @@
+<!--
+title: Limpeza de Database
+description: Rotina de limpeza geral da base.
+published: 1
+date: 2026-08-26T15:03:22.815Z
+tags: sql
+editor: ckeditor
+dateCreated: 2025-10-23T14:40:31.594Z
+-->
+
+<pre><code class="language-plaintext">-- Fazer backup de tudo
+-- Clear webhook
+DELETE FROM sis_filial_crm_webhook WHERE filial_crm_webhook_data &lt; DATE_SUB(NOW(), INTERVAL 1 WEEK);
+
+-- Clear webhook 
+DELETE FROM sis_filial_assinatura_webhook WHERE assinatura_webhook_data &lt; DATE_SUB(NOW(), INTERVAL 1 WEEK);
+
+-- Clear lead log
+DELETE FROM sis_crm_lead_log WHERE crm_lead_log_data &lt; DATE_SUB(NOW(), INTERVAL 1 MONTH);
+
+-- Clear alerts
+DELETE FROM sis_alerta WHERE alerta_data_cadastro &lt; DATE_SUB(NOW(), INTERVAL 1 MONTH);
+
+-- Antes de rodar essa, exporte e salve no BUCKET
+-- TRUNCATE sis_log;
+
+-- Antes de rodar essa, exporte e salve no BUCKET
+-- TRUNCATE sis_veiculo_log;
+
+SELECT 
+    table_schema AS 'Banco de Dados',
+    ROUND(SUM(data_length + index_length) / 1024 / 1024 / 1024, 2) AS 'Tamanho (GB)'
+FROM 
+    information_schema.TABLES
+WHERE 
+    table_schema = 'boomsistemas'
+GROUP BY 
+    table_schema;
+
+-- Limpa o slowquerys
+-- TRUNCATE TABLE mysql.slow_log;
+
+
+
+-- Mais pesada
+SELECT 
+    TABLE_NAME,
+    TABLE_ROWS
+FROM 
+    INFORMATION_SCHEMA.TABLES
+WHERE 
+    TABLE_SCHEMA = 'boomsistemas'
+ORDER BY 
+    TABLE_ROWS DESC;</code></pre>

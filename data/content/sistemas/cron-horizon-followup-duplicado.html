@@ -1,0 +1,49 @@
+<!--
+title: Cron - Horizon Parado e Follow-up Duplicado
+description: Postmortem (ago/2026): Horizon sem supervisor gerou follow-up de IA duplicado.
+published: 1
+date: 2026-08-26T15:03:21.527Z
+tags: cron, horizon, postmortem
+editor: ckeditor
+dateCreated: 2026-08-19T16:41:16.131Z
+-->
+
+<h1>Cron - Horizon parado + Follow-up IA duplicado (14-19/08/2026)</h1>
+
+<p><strong>Resumo:</strong> entre 14/08 e 19/08 o Horizon do <code>boom_cron</code> ficou parado (sem processar filas) sem ninguém perceber, enquanto o scheduler (<code>schedule:work</code>) continuou rodando normal. Isso fez o comando de follow-up de IA acumular ~30 mil jobs duplicados no Redis, que dispararam em rajada assim que o Horizon voltou, mandando a mesma mensagem de WhatsApp várias vezes pro mesmo lead.</p>
+
+<h2>Linha do tempo</h2>
+<ul>
+<li><strong>14/08</strong>: deploy de um job novo + <code>horizon:terminate</code> pra aplicar o código (fluxo normal). O master do Horizon encerra e <strong>não volta sozinho</strong>.</li>
+<li><strong>14-19/08</strong>: <code>schedule:work</code> continua rodando (não depende do Horizon), então o <code>app:task-ia-followup</code> segue disparando a cada 30 min normalmente — só que ninguém consome a fila. Rotinas síncronas (cleanup de tabelas, etc.) continuam mandando e-mail de resumo, dando falsa sensação de tudo ok.</li>
+<li><strong>19/08</strong>: alguém roda <code>php artisan horizon</code> manualmente. A fila (~30 mil jobs) começa a ser drenada e um mesmo lead recebe a mesma mensagem de follow-up várias vezes em minutos.</li>
+</ul>
+
+<h2>Causa raiz</h2>
+<p>O container <code>cronjobs</code> nunca teve um supervisor de verdade cuidando do Horizon — o <code>start.sh</code> só fazia <code>php artisan horizon &amp;</code> uma vez no boot. <code>horizon:terminate</code> pressupõe um process monitor (Supervisor/systemd) que suba o processo de novo; sem isso, o terminate mata a fila pra sempre até alguém notar e reiniciar na mão.</p>
+
+<h2>Bug que amplificou (30 mil jobs em vez de só ficar parado)</h2>
+<p><code>TaskIaFollowup</code> reselecionava o mesmo lead a cada execução (30 em 30 min) enquanto <code>ia_followup_enviado_count</code> não avançasse — e esse contador só avança quando o job <em>de fato processa e envia</em>. Sem nenhuma trava de "já existe job pendente pra esse lead", cada ciclo empilhava mais um job duplicado. Em ~4,5 dias isso virou ~30 mil jobs represados.</p>
+
+<h2>Fixes aplicados</h2>
+<h3>1. Supervisor versionado (boom_docker_stack)</h3>
+<p>Um supervisord já tinha sido instalado na mão direto no container de produção pra resolver o sintoma imediato — mas não estava em lugar nenhum versionado, então se o container fosse recriado do zero a correção sumia. Agora está no Dockerfile (<code>apk add supervisor</code>) + <code>FilesConfigs/cronjobs/supervisord.conf</code> (horizon/scheduler/dashboard com <code>autorestart=true</code>), montado via <code>docker-compose.yml</code>.</p>
+
+<h3>2. Dedupe no despacho (TaskIaFollowup)</h3>
+<p>Antes de despachar um <code>ProcessIaFollowupJob</code>, checa um <code>Cache::add("ia_followup_dispatched:{lead}:{count}", true, 2h)</code>. Se já existe (job ainda não processado), pula — evita empilhar duplicata a cada ciclo de 30 min.</p>
+
+<h3>3. Idempotência no envio (ProcessIaFollowupJob) — a proteção que realmente importa</h3>
+<p>No início do <code>handle()</code>, reconfere o <code>ia_followup_enviado_count</code> atual do lead contra o valor esperado no momento do despacho (<code>expectedCount</code>). Se não bater (outro job já processou), sai sem mandar mensagem. Isso garante que, <strong>mesmo que existam N jobs duplicados na fila</strong> (por qualquer motivo futuro), só o primeiro realmente manda a mensagem pro cliente — os demais são ignorados silenciosamente. O update do contador também ficou condicional (<code>WHERE ia_followup_enviado_count = expectedCount</code>) pra fechar a corrida entre workers concorrentes.</p>
+
+<h3>4. Alerta de acúmulo de fila (novo)</h3>
+<p>Comando <code>app:monitor-queue-backlog</code>, rodando de hora em hora, olha o tamanho de todas as filas configuradas no Horizon (via <code>config('horizon.defaults')</code>, então pega qualquer fila nova automaticamente) e manda e-mail (mesmo padrão do resumo de cleanup) pra <code>dev@boomsistemas.com.br</code> quando alguma passar de 50 jobs pendentes (configurável via <code>QUEUE_ALERT_THRESHOLD</code>). Cooldown de 1h pra não spammar enquanto o problema persiste.</p>
+
+<h2>Onde estão as mudanças</h2>
+<ul>
+<li><code>boom_cron</code> — commits <code>4e76014</code> (fix duplicação), <code>02a3a7e</code> (alerta de fila)</li>
+<li><code>boom_docker_stack</code> — commit <code>2366e4b</code> (supervisord versionado)</li>
+</ul>
+
+<h2>Como confirmar que o Horizon está de pé</h2>
+<pre><code>docker exec cronjobs ps aux | grep horizon</code></pre>
+<p>Se algum dia <code>horizon:terminate</code> for necessário de novo, não precisa mais rodar <code>php artisan horizon</code> na mão depois — o supervisord sobe ele sozinho em ~2s.</p>

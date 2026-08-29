@@ -1,0 +1,65 @@
+<!--
+title: Unificação de Filial
+description: Procedimento de unificação de filiais.
+published: 1
+date: 2026-08-26T15:03:25.385Z
+tags: sql
+editor: ckeditor
+dateCreated: 2025-10-22T13:24:54.648Z
+-->
+
+<pre><code class="language-plaintext">SET @old_filial := 1719;  -- 👈 filial antiga
+SET @new_filial := 676;   -- 👈 filial nova
+SET @schema := 'boomsistemas'; -- 👈 banco de dados
+
+-- Ajuste para permitir concatenação longa, caso haja muitas tabelas
+SET SESSION group_concat_max_len = 1000000;
+
+-- Gerar SELECTs
+SELECT GROUP_CONCAT(
+    CONCAT('SELECT * FROM ', TABLE_SCHEMA, '.', TABLE_NAME, ' WHERE filial_id = ', @old_filial, ';')
+    SEPARATOR '\n'
+) AS selects
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = @schema
+  AND COLUMN_NAME = 'filial_id';
+
+-- Gerar UPDATEs
+SELECT GROUP_CONCAT(
+    CONCAT('UPDATE ', TABLE_SCHEMA, '.', TABLE_NAME,
+           ' SET filial_id = ', @new_filial,
+           ' WHERE filial_id = ', @old_filial, ';')
+    SEPARATOR '\n'
+) AS updates
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = @schema
+  AND COLUMN_NAME = 'filial_id';</code></pre>
+<h3><br>🧩 Script: Geração automática de SELECTs e UPDATEs para unificação de filiais</h3>
+<h4>📘 Descrição</h4>
+<p>Este script SQL foi criado para <strong>auxiliar na unificação de filiais</strong> dentro do banco de dados, permitindo identificar e atualizar todos os registros relacionados a uma filial antiga (<code>@old_filial</code>) para uma nova filial (<code>@new_filial</code>), de forma automatizada e segura.<br>&nbsp;</p>
+<h4>⚙️ Funcionamento</h4>
+<p><strong>Definição de variáveis principais:</strong></p>
+<p><code>@old_filial</code>: ID da filial antiga que será substituída.</p>
+<p><code>@new_filial</code>: ID da filial nova que substituirá a antiga.</p>
+<p><code>@schema</code>: Nome do banco de dados onde a busca será realizada.</p>
+<p><strong>Ajuste de configuração:</strong></p>
+<p>O comando <code>SET SESSION group_concat_max_len = 1000000;</code> aumenta o limite do <code>GROUP_CONCAT</code>, garantindo que o resultado não seja truncado, mesmo que existam muitas tabelas com o campo <code>filial_id</code>.</p>
+<p><strong>Geração de comandos SELECT:</strong></p>
+<p>A primeira consulta percorre todas as tabelas do schema informado que possuem a coluna <code>filial_id</code>.</p>
+<p>Para cada uma delas, gera um comando <code>SELECT * FROM tabela WHERE filial_id = @old_filial;</code></p>
+<p>Isso permite <strong>verificar previamente quais registros seriam afetados</strong> antes de executar qualquer atualização.</p>
+<p><strong>Geração de comandos UPDATE:</strong></p>
+<p>A segunda consulta cria automaticamente os comandos <code>UPDATE</code> para todas as tabelas que possuem o campo <code>filial_id</code>.</p>
+<p>Cada comando atualiza o valor de <code>filial_id</code> de <code>@old_filial</code> para <code>@new_filial</code>.</p>
+<p>Exemplo:<br>&nbsp;</p>
+<h4>💡 Utilidade</h4>
+<p><strong>Unificação de filiais:</strong> facilita o processo quando há necessidade de consolidar registros de duas filiais em uma só (ex: após fusões, reorganizações ou encerramentos).</p>
+<p><strong>Automação:</strong> evita a necessidade de procurar manualmente todas as tabelas relacionadas.</p>
+<p><strong>Segurança:</strong> possibilita gerar os <code>SELECTs</code> primeiro para revisão antes de aplicar os <code>UPDATEs</code>.<br>&nbsp;</p>
+<h4>⚠️ Recomendações</h4>
+<p>Sempre <strong>executar os SELECTs primeiro</strong> para confirmar quais registros serão impactados.</p>
+<p>Realizar <strong>backup completo</strong> do banco antes de aplicar os <code>UPDATEs</code>.</p>
+<p>Ideal para ambientes de <strong>manutenção, migração ou auditoria</strong>.</p>
+<p>&nbsp;</p>
+<p><code>UPDATE boomsistemas.clientes SET filial_id = 676 WHERE filial_id = 1719;
+  </code></p>
