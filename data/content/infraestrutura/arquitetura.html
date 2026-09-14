@@ -1,9 +1,9 @@
 <!--
 title: Arquitetura de Infraestrutura
-description: Mapa completo: VPC sem subnet privada, RDS master + 3 replicas, stacks Docker por EC2, Kong sem upstreams e o Gotenberg do centralizador.
+description: Mapa completo: VPC sem subnet privada, RDS master + 3 replicas, stacks Docker por EC2, Kong sem upstreams, a stack do aplicaboom e o Gotenberg do centralizador.
 published: 1
-date: 2026-08-27T03:34:41.220Z
-tags: arquitetura, aws, docker, ec2, infraestrutura, kong, rds, rede
+date: 2026-09-14T21:45:27.887Z
+tags: arquitetura, aws, docker, ec2, infraestrutura, kong, rds, rede, aplicaboom
 editor: ckeditor
 dateCreated: 2026-08-27T03:24:08.659Z
 -->
@@ -109,6 +109,7 @@ graph TD
 <tr><td><code>boomsistemas.com.br</code></td><td>A / AAAA</td><td>alias → ALB <code>spboomsistemas</code></td><td>É aqui que o app principal responde</td></tr>
 <tr><td><code>www</code></td><td>A</td><td>alias → ALB <code>spboomsistemas</code></td><td>Mesmo destino do apex</td></tr>
 <tr><td><code>api</code></td><td>A</td><td>alias → ALB <code>kong-elb</code></td><td>Única porta de entrada do Kong</td></tr>
+<tr><td><code>aplicaboom-api.duckdns.org</code></td><td>A (DuckDNS)</td><td><code>18.230.195.40</code></td><td><strong>Fora do Route 53.</strong> Serve para SSH na EC2 <code>aplicaboom_api</code>; a API do aplicativo responde em <code>api.boomsistemas.com.br/aplicaboom</code></td></tr>
 <tr><td><code>arquivos</code></td><td>A</td><td>CloudFront <code>d1kqxo9rmggxxo</code></td><td>Origem: bucket S3 em <code>us-west-1</code></td></tr>
 <tr><td><code>homolog</code></td><td>A</td><td>ELB Beanstalk <code>us-west-1</code></td><td>Único uso real da região us-west-1</td></tr>
 <tr><td><code>staging</code></td><td>A</td><td><code>54.176.4.83</code></td><td>EC2 fora da VPC de produção</td></tr>
@@ -119,6 +120,8 @@ graph TD
 <tr><td><code>email</code>, <code>clickemail</code>, <code>mail</code></td><td>CNAME / MX</td><td>SendGrid + Zoho + Brevo</td><td>SPF/DKIM/DMARC configurados</td></tr>
 </tbody>
 </table>
+
+<p>O aplicativo <strong>não tem subdomínio próprio</strong>. A ideia de <code>aplicaboom-api.boomsistemas.com.br</code> foi descartada em set/2026: exigiria certificado ACM, SNI adicional no listener do <code>kong-elb</code> e registro no Route 53 para um host que só o app consome. Ele entra pelo <code>api</code> que já existe, sob o prefixo de path <code>/aplicaboom</code> — ver 4.2 e 4.3.</p>
 
 <h4>Duas armadilhas de DNS</h4>
 
@@ -194,11 +197,14 @@ graph TD
 <tr><td><code>sg-0c13ba013fb3b7eb0</code><br/><code>launch-wizard-5</code></td><td>cron</td><td><code>8085 ← 2 IPs fixos</code>. <code>22 ← 0.0.0.0/0</code></td></tr>
 <tr><td><code>sg-0f7153efb095a9b0c</code><br/><code>launch-wizard-7</code></td><td>socket</td><td><code>3111</code>, <code>443</code> e <code>22</code> de <code>0.0.0.0/0</code></td></tr>
 <tr><td><code>sg-09c9e24910782a0c9</code><br/><code>launch-wizard-4</code></td><td>papa-entulho</td><td><strong><code>3308 ← 0.0.0.0/0</code></strong> e <code>22 ← 0.0.0.0/0</code></td></tr>
+<tr><td><code>sg-09cc6349234c6202e</code><br/><code>launch-wizard-9</code></td><td>aplicaboom_api</td><td><code>3334 ← sg-04958158c7c361c2d</code> (só o Kong, <strong>por SG e não por IP</strong>). <code>22 ← 1 IP fixo</code></td></tr>
 <tr><td><code>sg-044518faf56a13082</code><br/><code>rds</code></td><td><strong>RDS</strong></td><td><code>3306 ← 7 IPs públicos /32</code></td></tr>
 </tbody>
 </table>
 
 <p>Dois padrões bons que vale preservar: o Kong só aceita 8400 vindo do SG do ALB, e <code>api-main</code>/<code>boomia</code> só aceitam tráfego de aplicação vindo do IP do Kong. Não existe caminho lateral para essas duas APIs — quem quiser chegar nelas passa pelo gateway.</p>
+
+<p>O <code>launch-wizard-9</code> (set/2026) é o primeiro a referenciar o <strong>security group</strong> do Kong em vez do IP público dele, e o único cuja porta 22 não está aberta para o mundo. A diferença não é estética: regra por IP público só casa quando o tráfego sai pela internet e volta (hairpin no IGW). Com a origem por SG, o Kong alcança a máquina pelo IP privado, sem sair da VPC — <strong>e o caminho público deixa de funcionar</strong>, que é exatamente o desejado.</p>
 
 <h2>2. Amazon RDS — master e réplicas</h2>
 
@@ -270,7 +276,7 @@ graph LR
 <p>Nada disso é incidente e nada precisa mudar hoje — mas é a diferença entre o desenho presumido e o desenho real, e é a informação que falta quando alguém for planejar a próxima mudança de banco.</p>
 <h2>3. Servidores EC2 e stacks Docker</h2>
 
-<p>Todas as instâncias usam a key pair <code>new-prod-sp</code> e ficam na subnet pública da sua AZ. O comando SSH de cada uma está no config do Terminator — ver <a href="/pt-br/infraestrutura/terminator">Terminator</a>. Percentual de disco é do momento da coleta. A <code>centralizador</code> é a única sem entrada no Terminator — o comando dela está em 3.9.</p>
+<p>Todas as instâncias usam a key pair <code>new-prod-sp</code> e ficam na subnet pública da sua AZ. O comando SSH de cada uma está no config do Terminator — ver <a href="/pt-br/infraestrutura/terminator">Terminator</a>. Percentual de disco é do momento da coleta. A <code>centralizador</code> é a única sem entrada no Terminator — o comando dela está em 3.9. A <code>aplicaboom_api</code> é a mais nova (set/2026) e a única alcançável por <strong>nome</strong> em vez de IP: <code>ssh ubuntu@aplicaboom-api.duckdns.org</code>.</p>
 
 <table>
 <thead><tr><th>Nome</th><th>Instance ID</th><th>Tipo</th><th>AZ</th><th>IP privado</th><th>IP público</th><th>Estado</th></tr></thead>
@@ -285,6 +291,7 @@ graph LR
 <tr><td><code>papa-entulho</code></td><td><code>i-077a6f0961a31a8ed</code></td><td>t3.micro</td><td><strong>1c</strong></td><td>172.31.42.115</td><td>18.230.209.162</td><td>running</td></tr>
 <tr><td><code>redis-legado</code></td><td><code>i-0edd22d3b50f9ad2a</code></td><td>t3.small</td><td>1a</td><td>172.31.12.3</td><td>54.233.59.49</td><td>running</td></tr>
 <tr><td><code>centralizador</code></td><td><code>i-0a6c05d10d70020be</code></td><td>t3.small</td><td>1a</td><td>172.31.13.204</td><td>52.67.141.237</td><td>running</td></tr>
+<tr><td><code>aplicaboom_api</code></td><td><code>i-0a7e9a799921f94b8</code></td><td>t3.micro</td><td><strong>1c</strong></td><td>172.31.32.220</td><td>18.230.195.40</td><td>running</td></tr>
 </tbody>
 </table>
 
@@ -526,7 +533,44 @@ KONG_TRUSTED_IPS=0.0.0.0/0,::/0</code></pre>
 
 <p>Nenhum dos dois roda continuamente — não aparecem em <code>docker ps</code> fora de uma execução.</p>
 
-<h3>3.10 Ambiente local de desenvolvimento</h3>
+<h3>3.10 <code>aplicaboom_api</code> — API do aplicativo Flutter</h3>
+
+<p>Stack em <code>~/aplicaboom_api_docker_stack/</code> (repositório <code>SistemasBoom/aplicaboom_api_docker_stack</code>). <strong>Ubuntu 26.04</strong> — é a única da frota que não é Amazon Linux. SGs <code>launch-wizard-9</code> + <code>ec2-rds-4</code>. Serve exclusivamente o aplicativo <strong>aplicaboom</strong>; nenhum outro projeto consome esta API.</p>
+
+<table>
+<thead><tr><th>Container</th><th>Imagem</th><th>Porta</th><th>Papel</th></tr></thead>
+<tbody>
+<tr><td><code>aplicaboom_api</code></td><td><code>aplicaboom_api:prod</code> (build local)</td><td><code>172.31.32.220:3334</code></td><td>AdonisJS 6 compilado</td></tr>
+<tr><td><code>aplicaboom_redis</code></td><td><code>redis:8-alpine</code></td><td><strong>sem porta no host</strong></td><td>Cache da própria API</td></tr>
+<tr><td><code>aplicaboom_duckdns</code></td><td><code>lscr.io/linuxserver/duckdns</code></td><td>—</td><td>Mantém o nome apontado para o IP público</td></tr>
+</tbody>
+</table>
+
+<p><strong>A imagem é construída, não montada.</strong> Diferente do <code>api-main</code>, que monta <code>./Projects/</code> e roda <code>node ace serve</code> sobre o TypeScript, aqui o <code>Dockerfile</code> multi-estágio do próprio projeto gera a imagem: Node 22 LTS (e não a 25 do desenvolvimento), JavaScript já compilado, <code>dumb-init</code> como PID 1 e usuário <code>node</code>. O <code>dumb-init</code> não é enfeite — sem ele o Node não encerra o pool de banco no <code>docker stop</code> e cada deploy deixa conexão pendurada no RDS.</p>
+
+<p><strong>A porta 3334 é publicada no IP privado</strong> (<code>API_BIND</code> no <code>.env</code> da stack), e não em <code>0.0.0.0</code> nem no loopback. Loopback não serviria porque o Kong está em outra EC2; <code>0.0.0.0</code> deixaria <code>/v1/auth/login</code> exposto direto na internet. Quem alcança é só o SG do Kong — conferido do próprio Kong: pelo IP privado responde em 3,8 ms, pelo público dá timeout.</p>
+
+<h4>Swap obrigatório</h4>
+
+<p>A máquina tem <strong>908 MB de RAM</strong> e nenhum swap por padrão. O <code>node ace build</code> compila TypeScript e não cabe nisso. A stack só sobe depois de <code>/swapfile</code> de 2 GB no <code>/etc/fstab</code>, com <code>vm.swappiness=10</code> — encostar no disco só sob pressão real, para não empurrar o processo da API para lá no dia a dia.</p>
+
+<h4>Acesso ao GitHub: deploy key por repositório</h4>
+
+<p>A máquina precisa clonar <strong>dois</strong> repositórios (a stack e a API), e deploy key do GitHub vale para <strong>um</strong> repositório cada. São duas chaves em <code>~/.ssh</code>, ambas somente leitura, com alias no <code>~/.ssh/config</code> (<code>github-stack</code> e <code>github-api</code>) para o git escolher a certa em cada clone. A chave que já existia na máquina era deploy key da <code>api_docker_stack</code> e não servia para nenhum dos dois.</p>
+
+<h4>Migrations: <code>exec</code>, nunca <code>run --rm</code></h4>
+
+<p>O serviço tem <code>ipv4_address</code> fixo na rede da stack. Com a API de pé, <code>docker compose run</code> tenta criar um segundo container com o mesmo <code>10.61.0.10</code> e morre em <code>Address already in use</code>. O comando certo é:</p>
+
+<pre><code>docker compose exec -w /app aplicaboom_api node ace migration:run --force</code></pre>
+
+<h4>Versão do aplicativo exigida</h4>
+
+<p>O <code>.env</code> do projeto tem <code>APP_VERSION_REQUIRED</code>, servido em <code>GET /v1/app/versao</code> (público, sem banco e sem Redis de propósito — precisa responder mesmo com o resto degradado). O app compara com a própria versão a cada abertura e ao voltar do segundo plano; divergiu, ele bloqueia a tela pedindo atualização e mostra as duas versões.</p>
+
+<p><strong>A variável é opcional, e vazio significa "não exijo versão".</strong> Falhar fechado trancaria a base inteira do lado de fora por causa de uma variável esquecida no deploy — e ninguém consegue atualizar para uma versão que talvez nem esteja publicada na loja. Pelo mesmo motivo, só preencha com uma versão que já está disponível para instalar.</p>
+
+<h3>3.11 Ambiente local de desenvolvimento</h3>
 
 <p>Fora da AWS, mas é o que o time roda no dia a dia: <code>~/boom_docker_stack/docker-compose.yml</code>, rede <code>boom_network</code> <code>172.30.0.0/16</code> com IPs fixos por serviço. Reproduz a produção com diferenças importantes:</p>
 
@@ -595,10 +639,14 @@ GET /snis       → {"data": []}</code></pre>
 <tr><td><code>docs</code></td><td><code>http://52.67.152.88:3333/v1/docs</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
 <tr><td><code>swagger</code></td><td><code>http://52.67.152.88:3333/v1/swagger</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
 <tr><td><code>boomia</code></td><td><code>https://boomia.duckdns.org:443</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
+<tr><td><code>aplicaboom-api</code></td><td><code>http://172.31.32.220:3334</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
+<tr><td><code>aplicaboom-api-login</code></td><td><code>http://172.31.32.220:3334/v1/auth/login</code></td><td>5</td><td>60s / 60s / 60s</td></tr>
 </tbody>
 </table>
 
 <p>O <code>api-loja</code> tem timeout de <strong>10s</strong> contra 60s dos demais — é a rota de negócio e falha rápido de propósito. O <code>boomia</code> em 60s acomoda a latência do Gemini.</p>
+
+<p>Os dois <code>aplicaboom-api*</code> são o <strong>mesmo backend</strong>, e existem em dobro por causa do <code>strip_path</code>. O Kong remove o path <strong>inteiro</strong> que casou: uma route <code>/aplicaboom/v1/auth/login</code> com strip ligado entregaria <code>/</code> para a API. O segundo service tem <code>path</code> próprio, que o Kong recoloca depois do strip — assim a API recebe <code>/v1/auth/login</code> e a route de login pode carregar o <code>rate-limiting</code> dela. É também o único service que aponta para um <strong>IP privado</strong>; todos os outros usam IP público ou DuckDNS, tráfego que sai pela internet e volta.</p>
 
 <h3>4.3 Routes</h3>
 
@@ -612,11 +660,15 @@ GET /snis       → {"data": []}</code></pre>
 <tr><td><code>v1_docs</code></td><td><code>/v1/docs</code></td><td>true</td><td><code>docs</code></td></tr>
 <tr><td><code>v1_swagger</code></td><td><code>/v1/swagger</code></td><td>true</td><td><code>swagger</code></td></tr>
 <tr><td><code>health</code></td><td><code>/health</code></td><td>true</td><td>— (terminada no Kong)</td></tr>
+<tr><td><code>aplicaboom-api</code></td><td><code>/aplicaboom</code></td><td>true</td><td><code>aplicaboom-api</code></td></tr>
+<tr><td><code>aplicaboom-api-login</code></td><td><code>/aplicaboom/v1/auth/login</code> — <strong>só POST</strong></td><td>true</td><td><code>aplicaboom-api-login</code></td></tr>
 <tr><td><code>root</code></td><td><code>/</code></td><td>true</td><td>— (redirect 301)</td></tr>
 </tbody>
 </table>
 
-<p>Nenhuma route filtra por <code>hosts</code> ou por <code>methods</code> — o roteamento é puramente por path. Como só existe um hostname de entrada (<code>api.boomsistemas.com.br</code>), isso funciona, mas significa que <strong>qualquer hostname que resolva para o ALB <code>kong-elb</code> casa nas mesmas rotas</strong>.</p>
+<p>Só a <code>aplicaboom-api-login</code> filtra por <code>methods</code> (POST); nenhuma filtra por <code>hosts</code> — o roteamento é essencialmente por path. Como só existe um hostname de entrada (<code>api.boomsistemas.com.br</code>), isso funciona, mas significa que <strong>qualquer hostname que resolva para o ALB <code>kong-elb</code> casa nas mesmas rotas</strong>.</p>
+
+<p><strong>Atenção ao adicionar rota sob um prefixo novo:</strong> como o casamento é por path na raiz do domínio, <code>/v1/docs</code> e <code>/v1/swagger</code> pertencem à API de parceiros. Uma página servida sob <code>/aplicaboom</code> que peça o spec em <code>/v1/swagger</code> <strong>absoluto</strong> cai na API errada — foi o que aconteceu com a documentação do aplicativo, corrigido passando caminho relativo no <code>AutoSwagger.scalar()</code>.</p>
 
 <p>As três rotas <code>v1_loja*</code> usam <code>strip_path: false</code>: o path completo é repassado ao AdonisJS, que faz o roteamento fino. As duas regex existem para <strong>aplicar ACL diferente no mesmo service</strong> — é o mecanismo de autorização por área, detalhado abaixo.</p>
 
@@ -644,6 +696,7 @@ GET /snis       → {"data": []}</code></pre>
 <tr><td><code>api-loja</code></td><td><code>post-function</code></td><td>Lua no <code>access</code>: se o consumer for <code>cnpj-restrict-request-users</code>, valida o CNPJ do path contra o nome da credencial</td></tr>
 <tr><td><code>boomia</code></td><td><code>basic-auth</code></td><td><code>realm: service</code></td></tr>
 <tr><td><code>boomia</code></td><td><code>rate-limiting</code></td><td>15/s · limites de minuto/hora/mês praticamente abertos (999999+)</td></tr>
+<tr><td>route <code>aplicaboom-api-login</code></td><td><code>rate-limiting</code></td><td>10/min e 200/h por IP, só no <code>POST /aplicaboom/v1/auth/login</code></td></tr>
 <tr><td>route <code>health</code></td><td><code>request-termination</code></td><td>HTTP 200 <code>ok</code> sem tocar em backend — é o alvo do health check do ALB</td></tr>
 <tr><td>route <code>root</code></td><td><code>redirect</code></td><td>301 → <code>https://api.boomsistemas.com.br/v1/docs</code></td></tr>
 </tbody>
@@ -654,6 +707,7 @@ GET /snis       → {"data": []}</code></pre>
 <ul>
 <li><strong><code>accept_http_if_already_terminated: true</code> no oauth2 é obrigatório aqui.</strong> O TLS termina no ALB e o Kong recebe HTTP puro; sem essa flag o plugin recusaria o fluxo OAuth por não estar em HTTPS.</li>
 <li><strong><code>policy: local</code> no rate-limiting.</strong> O contador vive na memória do nó Kong. Com uma instância isso é exato — quando houver a segunda, o limite efetivo passa a ser o dobro do configurado, porque cada nó conta o seu. A migração é apontar o plugin para Redis.</li>
+<li><strong>O limite do login do aplicativo é o oposto: apertado de propósito.</strong> O <code>/v1/auth/login</code> gasta scrypt por construção — é o que impede descobrir e-mail válido pelo tempo de resposta —, então ele é caro e é o alvo natural de força bruta. Cuidado para não apertar mais: operadora de celular faz NAT, e muitos aparelhos compartilham o mesmo IP de saída.</li>
 <li><strong>O rate limit do <code>boomia</code> é permissivo por desenho</strong> (15/s com teto de hora praticamente aberto): tráfego interno do CRM, não parceiro externo.</li>
 <li><strong>O <code>bot-detection</code> está cadastrado mas desabilitado.</strong> Não protege nada hoje; está lá como esqueleto.</li>
 <li><strong>Sem <code>request-transformer</code>, sem <code>http-log</code> e sem <code>file-log</code>.</strong> Não há transformação de header nem log de acesso via plugin — o log do Kong é o do container, coletado pelo Promtail para o Loki.</li>
@@ -748,9 +802,9 @@ sequenceDiagram
 <p>Enquanto o arquivo não for regerado a partir da produção, <strong>usar apenas <code>deck gateway diff</code>, nunca <code>sync</code>, apontando para produção.</strong> Para atualizar o arquivo, o caminho é <code>deck gateway dump</code> a partir do Kong de produção e commitar o resultado.</p>
 <h2>5. Cache, filas e comunicação interna</h2>
 
-<h3>5.1 As três instâncias de Redis</h3>
+<h3>5.1 As instâncias de Redis</h3>
 
-<p>Não existe um Redis central. São <strong>quatro processos em três EC2</strong>, cada um servindo a sua stack, sem replicação nem cluster entre eles:</p>
+<p>Não existe um Redis central. São <strong>cinco processos em quatro EC2</strong>, cada um servindo a sua stack, sem replicação nem cluster entre eles:</p>
 
 <table>
 <thead><tr><th>Onde</th><th>Container</th><th>Porta host</th><th>Quem acessa</th><th>Uso</th></tr></thead>
@@ -759,8 +813,15 @@ sequenceDiagram
 <tr><td><code>redis-legado</code></td><td><code>redis2</code></td><td><code>6377</code></td><td>SG <code>ec2-rds-4</code></td><td>Segunda base do legado</td></tr>
 <tr><td><code>boomia</code></td><td><code>redis</code></td><td><code>6380</code></td><td>SG <code>launch-wizard-1</code> (legado)</td><td>Cache do Laravel da IA — <strong>e alcançável pelo legado</strong></td></tr>
 <tr><td><code>cron</code></td><td><code>redis_cron</code></td><td><code>6380</code></td><td>local à instância</td><td><strong>Filas do Horizon</strong></td></tr>
+<tr><td><code>aplicaboom_api</code></td><td><code>aplicaboom_redis</code></td><td><strong>nenhuma</strong></td><td>só o container da API, pela rede da stack</td><td>Cache do dashboard e do quadro do CRM no aplicativo</td></tr>
 </tbody>
 </table>
+
+<p>O do <code>aplicaboom_api</code> nasceu dentro da própria stack em set/2026, no lugar de usar o <code>redis-legado</code>. O motivo é que <strong>não havia nada compartilhado</strong>: as chaves <code>apb:</code> são escritas e invalidadas só pela própria API, e o legado nunca as lê. O que sobrava era o risco — o <code>db0</code> daquele servidor guarda as <strong>sessões PHP</strong> do sistema web, e um <code>SCAN</code> ou <code>FLUSHDB</code> no db errado deslogaria a base inteira.</p>
+
+<p>Duas escolhas de configuração dele que não são óbvias: <code>maxmemory-policy volatile-lru</code> (e não <code>allkeys-lru</code>, porque as chaves de versão são <code>INCR</code> <strong>sem TTL</strong> — despejar uma zera o contador e ele pode colidir com entradas antigas ainda vivas) e <strong>sem persistência</strong>, já que o cache degrada para o banco quando o Redis some.</p>
+
+<p>⚠️ <strong>O que o sistema web limpa ao salvar configuração pertence aos outros</strong>: <code>uid-*-crm-filial-cfg</code> e <code>uid-*-menu</code> são do legado, e <code>filial_ia:*</code> / <code>loja_ai:*</code> são da boomia, apagados por <code>BoomiaService::clearIaCache()</code> numa conexão à parte. Quando o aplicativo ganhar a tela de gerenciar CRM, ele vai precisar de uma <strong>segunda conexão</strong> para apagar chave exata desses — não é motivo para trazer o cache dele de volta para o servidor do legado.</p>
 
 <p>Dois pontos que costumam confundir:</p>
 
@@ -784,6 +845,9 @@ graph LR
 
   KONG -->|"/v1/loja - /v1/docs - /v1/swagger"| API["api.boomsistemas.com.br<br/>AdonisJS - porta 3333"]
   KONG -->|"/boomia - basic-auth"| BIA["boomia<br/>Laravel - Gemini"]
+  KONG -->|"/aplicaboom - strip_path"| APB["aplicaboom_api<br/>AdonisJS - porta 3334<br/>IP privado"]
+
+  MOBILE["aplicaboom<br/>app Flutter"] --> ALB2
 
   APP -->|"HTTP interno"| BIA
   APP -->|"POST /emit - header x-secret"| SOCK["socket<br/>socket.io atras do Caddy"]
@@ -799,12 +863,17 @@ graph LR
   BIA -->|"logs_boomia"| PAPA
   CRON -->|"cron_logs"| PAPA
 
+  APB -->|"cache proprio"| RAPB["aplicaboom_redis<br/>na propria stack"]
+
   APP --> RDS["RDS MariaDB<br/>master + 3 replicas"]
   API --> RDS
   BIA --> RDS
   CRON --> RDS
+  APB --> RDS
 </code></pre>
 </div>
+
+<p>O aplicativo é o único cliente que <strong>não é um servidor</strong>, e isso muda o modelo de autorização. O Kong autentica parceiro por <code>oauth2</code> e a boomia por <code>basic-auth</code> porque, dos dois lados, o segredo mora num backend. Num celular não: qualquer credencial exigida pelo gateway iria compilada no APK, que é um zip que qualquer pessoa abre. Por isso <strong>o Kong não autentica o aplicativo</strong> — ele faz TLS, roteamento e rate limit, e quem autentica é a própria API, com token opaco em <code>auth_access_tokens</code> (o logout apaga a linha e o token morre na hora, coisa que um JWT stateless não permitiria).</p>
 
 <h4>Configuração de banco por projeto</h4>
 
@@ -881,6 +950,8 @@ graph LR
 <tr><td>16</td><td>Endpoint <code>/gotenberg/</code> exposto na internet, protegido só por basic auth</td><td>3.9</td><td>Motor de PDF sem auth própria atrás de uma senha; rotacionar o <code>htpasswd</code> periodicamente</td></tr>
 <tr><td>17</td><td>EC2 <code>centralizador</code> não roda o Centralizador; docroot vazio devolve 404</td><td>3.9</td><td>Nome enganoso: quem procurar o app nesta máquina não encontra. O app está em cPanel</td></tr>
 <tr><td>18</td><td>Reativar PHP no <code>centralizador</code> sem devolver o serviço <code>php8</code> ao compose</td><td>3.9</td><td><code>host not found in upstream</code> impede o nginx de subir e derruba o proxy do Gotenberg</td></tr>
+<tr><td>19</td><td><code>APP_VERSION_REQUIRED</code> preenchida com versão que ainda não está publicada na loja</td><td>3.10</td><td>Todo mundo é barrado na abertura do aplicativo, sem build para instalar. Esvaziar a variável destrava na hora</td></tr>
+<tr><td>20</td><td>Deploy keys da <code>aplicaboom_api</code> são por repositório e nascem com a máquina</td><td>3.10</td><td>Recriar a EC2 exige gerar e cadastrar duas chaves novas no GitHub antes de clonar</td></tr>
 </tbody>
 </table>
 
