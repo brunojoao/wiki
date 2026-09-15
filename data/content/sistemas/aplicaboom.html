@@ -2,8 +2,8 @@
 title: AplicaBoom - Aplicativo Flutter
 description: App mobile em Flutter: comandos do Makefile, flavors e endereco da API, arquitetura por feature e as armadilhas que ja custaram tempo do time.
 published: 1
-date: 2026-09-15T01:09:17.155Z
-tags: aplicaboom, arquitetura, crm, flutter, dart, mobile, app
+date: 2026-09-15T13:30:24.139Z
+tags: aplicaboom, app, arquitetura, crm, dart, flutter, mobile
 editor: ckeditor
 dateCreated: 2026-09-15T01:09:17.155Z
 -->
@@ -102,6 +102,59 @@ graph LR
 
 <blockquote class="is-info">
 <p><strong>Celular físico que não aparece no <code>adb devices</code>:</strong> lista vazia é diferente de <code>unauthorized</code>. <code>unauthorized</code> significa que falta aceitar a chave RSA na tela; <strong>lista vazia significa que o aparelho não está expondo ADB nenhum</strong> &mdash; confira se a depuração USB está mesmo ligada (<code>lsusb -v</code> deve mostrar uma interface classe 255, subclasse 66, além da de MTP). Em aparelho que não coopera por USB, a <strong>depuração sem fio</strong> do Android 11+ resolve: parear com código, e depois <code>adb connect</code> na porta que o <code>adb mdns services</code> informar &mdash; ela é <em>diferente</em> da porta de pareamento.</p>
+</blockquote>
+
+<h3>1.4 Depurar no celular físico, por ADB sem fio</h3>
+
+<p>O aparelho de teste é um <strong>CUBOT KINGKONG 9</strong> (Android 14, API 34, arm64-v8a) e ele <strong>não entrega ADB por USB</strong>: mesmo com a depuração USB ligada, ele expõe só a interface MTP e o <code>adb devices</code> volta vazio. O caminho que funciona é a depuração sem fio.</p>
+
+<p>O <strong>pareamento</strong> é uma vez por máquina e sobrevive a reinício. O que cai o tempo todo é a <strong>conexão</strong> &mdash; quando o aparelho dorme ou troca de rede. Por isso a sessão quase sempre começa reconectando:</p>
+
+<pre><code>export PATH="$HOME/Android/Sdk/platform-tools:$PATH"
+export PATH="$HOME/development/flutter/bin:$PATH"
+
+adb mdns services                 # descobre o IP:porta atual (_adb-tls-connect._tcp)
+adb connect 192.168.2.190:44203   # use o que o comando acima mostrar
+adb devices -l                    # o aparelho tem que aparecer como "device"</code></pre>
+
+<blockquote class="is-info">
+<p><strong>A porta de pareamento não é a porta de conexão.</strong> O <code>adb pair</code> usa a que aparece na tela &ldquo;Parear dispositivo com código&rdquo;; o <code>adb connect</code> usa a que o <code>adb mdns services</code> informa. Confundir as duas dá um erro que não explica por quê. Se o <code>adb mdns services</code> não lista nada, o aparelho está dormindo ou fora da rede: acorde a tela e ligue <strong>Permanecer ativo</strong> nas opções do desenvolvedor enquanto testa.</p>
+</blockquote>
+
+<p>Com o aparelho na lista, o comando que abre a depuração depende de qual API você quer do outro lado:</p>
+
+<table>
+<thead><tr><th>Contra</th><th>Comando</th><th>Observação</th></tr></thead>
+<tbody>
+<tr><td>API desta máquina</td><td><code>make run-lan</code></td><td><code>HOST_IP</code> descoberto na hora; o celular precisa estar na mesma rede</td></tr>
+<tr><td>API de produção</td><td><code>make run-prod-debug DEVICE=KINGKONG</code></td><td><strong>dados reais</strong> &mdash; ver 1.1</td></tr>
+</tbody>
+</table>
+
+<p>O <code>DEVICE=</code> casa qualquer coisa que o <code>flutter devices</code> liste, e existe porque com Linux, Chrome e o celular ligados ao mesmo tempo o <code>flutter run</code> para para perguntar qual usar. <strong>O <code>run-lan</code> ainda não repassa esse <code>DEVICE=</code></strong> &mdash; com mais de um aparelho ligado, use a linha crua:</p>
+
+<pre><code>flutter run -d KINGKONG \
+  --dart-define=API_BASE_URL=http://$(hostname -I | awk '{print $1}'):3334 \
+  -t lib/main_dev.dart</code></pre>
+
+<blockquote class="is-warning">
+<p><strong>Rode numa aba de terminal de verdade</strong>, nunca por script ou ferramenta em segundo plano. Sem TTY o <code>flutter run</code> entra em modo não interativo: a tecla <code>r</code> não chega e o processo mostra para sempre o build do instante em que subiu &mdash; parece hot reload quebrado, e não é. Diagnóstico: <code>ps -o pid,ppid,tty,cmd</code>; se a coluna <code>TT</code> for <code>?</code> em vez de <code>pts/N</code>, aquele processo não vai recarregar nunca. E no CLI o hot reload é manual: <code>r</code> recarrega, <code>R</code> reinicia; salvar o arquivo não dispara nada fora da IDE.</p>
+</blockquote>
+
+<p>Quando o objetivo é <strong>observar</strong> &mdash; log de início frio, estado salvo, screenshot &mdash; e não desenvolver com hot reload, o ciclo sem <code>flutter run</code> é mais direto e funciona por script:</p>
+
+<pre><code>flutter build apk --debug \
+  --dart-define=API_BASE_URL=http://$(hostname -I | awk '{print $1}'):3334 \
+  -t lib/main_dev.dart
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
+adb logcat -c                     # sem isso o buffer vem cheio de lixo antigo
+adb shell am start -n br.com.boomsistemas.aplicaboom/.MainActivity
+timeout 30 adb logcat -v time &gt; /tmp/app.log</code></pre>
+
+<p>Build de depuração é <code>debuggable</code>, então dá para ler o armazenamento por dentro sem root, com <code>adb shell run-as br.com.boomsistemas.aplicaboom cat /data/data/br.com.boomsistemas.aplicaboom/shared_prefs/*.xml</code>. Duas diferenças que viram instrumento de teste: <code>pm clear</code> limpa os dados <strong>sem</strong> disparar a restauração do backup do Google, enquanto <code>uninstall</code> + <code>install</code> <strong>dispara</strong> (ver 11. Pendências).</p>
+
+<blockquote class="is-info">
+<p><code>usesCleartextTraffic</code> <strong>não</strong> precisa ser declarado para o HTTP da LAN: o <code>dart:io</code> abre socket próprio e ignora a Network Security Config do Android. E <code>adb exec-out screencap -p</code> com o aparelho dormindo devolve um PNG <strong>todo preto</strong> &mdash; não é falha de captura; confira antes com <code>adb shell dumpsys power | grep mWakefulness</code>.</p>
 </blockquote>
 
 <h2>2. Ambientes e o endereço da API</h2>
