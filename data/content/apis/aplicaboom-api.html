@@ -1,0 +1,356 @@
+<!--
+title: AplicaBoom API
+description: A API dedicada do aplicativo: comandos e seeders, rotas v1, o E do escopo do CRM, cache versionado no Redis e as divergencias deliberadas do legado.
+published: 1
+date: 2026-09-15T01:09:29.323Z
+tags: api, aplicaboom, arquitetura, crm, adonisjs, cache, redis
+editor: ckeditor
+dateCreated: 2026-09-15T01:09:29.323Z
+-->
+
+<h1>AplicaBoom API</h1>
+
+<p>API dedicada ao <a href="/sistemas/aplicaboom">aplicativo AplicaBoom</a>, no repositório <code>Projects/aplicaboom_api</code>. <strong>AdonisJS 6</strong> (TypeScript, ESM) + <strong>Lucid</strong> sobre MySQL/MariaDB com réplicas de leitura, documentação por <code>adonis-autoswagger</code>. Espelha a stack da <code>api.boomsistemas.com.br</code>.</p>
+
+<p>É um <strong>par dedicado</strong>: ela atende exclusivamente o app, e o app não consome nenhuma outra API da stack. Quando o app precisa de dado de outro serviço, quem faz a ponte é ela.</p>
+
+<table>
+<thead><tr><th></th><th>Local</th><th>Produção</th></tr></thead>
+<tbody>
+<tr><td>Base</td><td><code>http://localhost:3334</code></td><td><code>https://api.boomsistemas.com.br/aplicaboom</code></td></tr>
+<tr><td>Docs (Scalar)</td><td><code>/v1/docs</code></td><td>&mdash;</td></tr>
+<tr><td>OpenAPI (YAML)</td><td><code>/v1/swagger</code></td><td>&mdash;</td></tr>
+<tr><td>Health</td><td><code>/health</code></td><td>&mdash;</td></tr>
+<tr><td>Versão pública</td><td><code>/v1/app/versao</code></td><td><code>/v1/app/versao</code></td></tr>
+</tbody>
+</table>
+
+<blockquote class="is-warning">
+<p><strong>Ela vive num CAMINHO do gateway, não num subdomínio.</strong> <code>aplicaboom-api.boomsistemas.com.br</code> foi descartado em set/2026 &mdash; exigiria certificado ACM, SNI adicional no listener do <code>kong-elb</code> e registro no Route 53 para um host que só o app consome. A infraestrutura de produção (EC2, stack Docker própria, rotas do Kong, swap, deploy keys) está em <a href="/infraestrutura/arquitetura">Arquitetura de Infraestrutura</a>, seção 3.</p>
+</blockquote>
+
+<h2>1. Comandos</h2>
+
+<p>Em desenvolvimento ela roda no container <code>aplicaboom_api</code> da stack em <code>~/boom_docker_stack</code>, montando o código e servindo com <code>node ace serve --watch</code>.</p>
+
+<pre><code>docker compose -f ~/boom_docker_stack/docker-compose.yml up -d aplicaboom_api
+docker logs -f aplicaboom_api</code></pre>
+
+<table>
+<thead><tr><th>Comando</th><th>O que faz</th></tr></thead>
+<tbody>
+<tr><td><code>npm run dev</code></td><td><code>node ace serve --hmr</code></td></tr>
+<tr><td><code>npm test</code></td><td><code>node ace test</code></td></tr>
+<tr><td><code>npm run lint</code></td><td>ESLint</td></tr>
+<tr><td><code>npm run typecheck</code></td><td><code>tsc --noEmit</code></td></tr>
+<tr><td><code>npm run format</code></td><td>Prettier</td></tr>
+<tr><td><code>npm run build</code></td><td><code>node ace build</code> &mdash; gera o JavaScript de produção</td></tr>
+<tr><td><code>node ace docs:generate</code></td><td>regera o Swagger estático a partir dos JSDoc dos controllers</td></tr>
+</tbody>
+</table>
+
+<p>Rodando por dentro do container, que é como se usa no dia a dia:</p>
+
+<pre><code>docker exec -w /usr/src/app aplicaboom_api npm test
+docker exec -w /usr/src/app aplicaboom_api node ace migration:status</code></pre>
+
+<blockquote class="is-info">
+<p><strong>Requisição HTTP para <code>127.0.0.1</code> disparada de fora do container não chega</strong> (responde <code>000</code>). Para testar a API local, entre no container: <code>docker exec aplicaboom_api curl -s localhost:3334/health</code>.</p>
+</blockquote>
+
+<h3>1.1 Dados de teste (seeders)</h3>
+
+<p>O banco local é cópia de produção, e a cópia envelhece &mdash; o dump mais novo para em agosto/2026. Como o painel do CRM filtra por <strong>mês corrente</strong> e o card do quadro mede o tempo desde a última interação, um banco velho abre <strong>painel zerado, colunas vazias e todo card com o badge vermelho de 7+ dias</strong>. Parece defeito e não é.</p>
+
+<table>
+<thead><tr><th>Seeder</th><th>O que repõe</th></tr></thead>
+<tbody>
+<tr><td><code>test_app_user_seeder.ts</code></td><td>usuário <code>teste.app@boomsistemas.com.br</code> / <code>aplicaboom123</code> para o login</td></tr>
+<tr><td><code>crm_demo_seeder.ts</code></td><td>~139 leads recentes, com responsáveis, tags, veículos, finalizações e eventos</td></tr>
+</tbody>
+</table>
+
+<pre><code>docker exec -w /usr/src/app aplicaboom_api \
+  node ace db:seed --files=database/seeders/crm_demo_seeder.ts</code></pre>
+
+<p>As datas são <strong>relativas ao dia em que roda</strong>, então o seeder continua valendo daqui a três meses, sem dump novo. A filial não é fixa no código: sai do vínculo de CRM de <code>demonstracao@demonstracao</code>, o mesmo caminho que o <code>CrmScopeResolver</code> percorre &mdash; assim o seeder e a tela nunca discordam sobre onde os dados estão.</p>
+
+<blockquote class="is-warning">
+<p><strong>Rodar de novo substitui, não acumula.</strong> Todo lead semeado carrega <code>@seed.aplicaboom.local</code> no e-mail, e a limpeza apaga por essa marca cercada por <code>filial_id</code> &mdash; nenhum lead vindo do dump é tocado.</p>
+<p><strong>O seeder escreve direto no banco, então não passa pela invalidação de cache.</strong> Os números novos aparecem quando o TTL expira (60s no quadro, 5 min no painel). Para ver na hora: <code>INCR</code> na versão da filial e <code>DEL</code> nas chaves exatas do painel &mdash; nunca <code>SCAN</code> por padrão, que <code>config/redis.ts</code> proíbe.</p>
+</blockquote>
+
+<h3>1.2 Migrations</h3>
+
+<p>São duas: <code>sis_user_app_auth</code> (a senha própria do app) e <code>auth_access_tokens</code> (os tokens opacos).</p>
+
+<blockquote class="is-danger">
+<p><strong>Em produção, <code>exec</code> &mdash; nunca <code>run --rm</code>.</strong> O serviço tem <code>ipv4_address</code> fixo na rede da stack; com a API de pé, <code>docker compose run</code> tenta criar um segundo container com o mesmo IP e morre em <code>Address already in use</code>.</p>
+<pre><code>docker compose exec -w /app aplicaboom_api node ace migration:run --force</code></pre>
+</blockquote>
+
+<h2>2. Rotas</h2>
+
+<p>Tudo sob <code>v1/</code>, agrupado por módulo em <code>start/routes/</code>. Só <code>auth/login</code> e <code>app/versao</code> são públicas.</p>
+
+<table>
+<thead><tr><th>Rota</th><th>Auth</th><th>Devolve</th></tr></thead>
+<tbody>
+<tr><td><code>GET /v1/app/versao</code></td><td>não</td><td><code>{versao_app_requerida, versao_api}</code></td></tr>
+<tr><td><code>POST /v1/auth/login</code></td><td>não</td><td><code>{access_token, user{...}}</code></td></tr>
+<tr><td><code>GET /v1/auth/me</code></td><td>sim</td><td><code>user{...}</code></td></tr>
+<tr><td><code>POST /v1/auth/refresh</code></td><td>sim</td><td><code>{access_token}</code> &mdash; rotaciona e revoga o antigo</td></tr>
+<tr><td><code>POST /v1/auth/logout</code></td><td>sim</td><td>204, revoga o token</td></tr>
+<tr><td colspan="3"><strong>Painel do CRM</strong> &mdash; um endpoint por <em>grupo de dados</em></td></tr>
+<tr><td><code>GET /v1/crm/dashboard/entrada</code></td><td>sim</td><td>Total de Leads, Melhor Origem, Leads Diários, Por Canal, Por Responsável</td></tr>
+<tr><td><code>GET /v1/crm/dashboard/finalizacao</code></td><td>sim</td><td>Vendas, Perdidos, os dois ciclos médios, Conversão, Motivos de Perda</td></tr>
+<tr><td><code>GET /v1/crm/dashboard/boomia</code></td><td>sim</td><td>os quatro cards da seção Boomia IA</td></tr>
+<tr><td><code>GET /v1/crm/dashboard/funil</code></td><td>sim</td><td>leads ativos por coluna</td></tr>
+<tr><td><code>GET /v1/crm/dashboard/filtros</code></td><td>sim</td><td>opções dos seletores + o escopo resolvido</td></tr>
+<tr><td colspan="3"><strong>Quadro (Kanban)</strong></td></tr>
+<tr><td><code>GET /v1/crm/kanban/colunas</code></td><td>sim</td><td>colunas + contadores + referências da filial + <code>permissoes</code></td></tr>
+<tr><td><code>GET /v1/crm/kanban/leads?coluna=&amp;pagina=</code></td><td>sim</td><td>UMA página de UMA coluna (15 por página)</td></tr>
+<tr><td><code>GET /v1/crm/kanban/versao</code></td><td>sim</td><td>revalidação: versão + contadores, TTL 15s</td></tr>
+<tr><td colspan="3"><strong>Lead</strong></td></tr>
+<tr><td><code>POST /v1/crm/leads</code></td><td>sim</td><td>cria &mdash; devolve o <strong>card pronto</strong></td></tr>
+<tr><td><code>GET /v1/crm/veiculos?termo=</code></td><td>sim</td><td>busca no estoque (mínimo 2 letras)</td></tr>
+<tr><td><code>PATCH /v1/crm/leads/:id/etapa</code></td><td>sim</td><td>o card atualizado</td></tr>
+<tr><td><code>PATCH /v1/crm/leads/:id/temperatura</code></td><td>sim</td><td>o card atualizado</td></tr>
+<tr><td colspan="3"><strong>Lote</strong> &mdash; <code>lead_ids</code> no corpo, resposta 200 mesmo com falhas</td></tr>
+<tr><td><code>POST /v1/crm/leads/lote/etapa</code></td><td>sim</td><td><code>{atualizados, solicitados, falhas[]}</code></td></tr>
+<tr><td><code>POST /v1/crm/leads/lote/temperatura</code></td><td>sim</td><td>idem</td></tr>
+<tr><td><code>POST /v1/crm/leads/lote/responsaveis</code></td><td>sim</td><td>idem &mdash; <strong>só gerente</strong></td></tr>
+<tr><td><code>POST /v1/crm/leads/lote/tags</code></td><td>sim</td><td>idem</td></tr>
+</tbody>
+</table>
+
+<p><strong><code>PATCH</code> e não <code>PUT</code></strong> nas ações de um lead: é alteração de um campo, o corpo não representa o lead inteiro. <strong><code>POST</code> e não <code>PATCH</code></strong> no lote: o alvo não é um recurso, é uma lista que vai no corpo. E <code>leads/lote/</code> nunca colide com <code>leads/:id</code> &mdash; <code>lote</code> não é um id válido, mas a leitura da tabela de rotas fica óbvia.</p>
+
+<h2>3. Autenticação</h2>
+
+<p>O token é <strong>opaco</strong> (guard <code>access_tokens</code> do <code>@adonisjs/auth</code>), <strong>não JWT</strong>: o logout apaga a linha e o token morre na hora. Com JWT stateless, sair do app não invalidaria nada até a expiração.</p>
+
+<p>A credencial mora em <code>sis_user_app_auth</code> (<code>user_id</code> PK/FK &rarr; <code>sis_user</code>, <code>password_hash</code> scrypt, <code>is_active</code>, <code>last_login_at</code>), separada da senha do sistema web &mdash; que usa MD5 sem salt. <code>sis_user</code> continua sendo a referência de identidade e de acesso.</p>
+
+<p>O <code>user</code> serializado <strong>traduz o legado na fronteira</strong> &mdash; o app não conhece <code>user_name</code> nem <code>user_lastname</code>:</p>
+
+<pre><code>{ "id": "123", "name": "Maria Silva", "email": "...", "avatar_url": null,
+  "phone": "...", "roles": ["grupo_acesso:3"],
+  "grupo_acesso_id": 3, "filial_id": 45 }</code></pre>
+
+<p><code>avatar_url</code> vai sempre nulo: <code>sis_user</code> não tem coluna de foto (verificado com <code>DESCRIBE</code>).</p>
+
+<h3>3.1 Regras de recusa</h3>
+
+<p>O corpo do erro traz um <code>code</code> estável, para o app decidir sem comparar texto.</p>
+
+<table>
+<thead><tr><th><code>code</code></th><th>HTTP</th><th>Quando</th></tr></thead>
+<tbody>
+<tr><td><code>INVALID_CREDENTIALS</code></td><td>401</td><td>e-mail não existe <strong>ou</strong> senha errada</td></tr>
+<tr><td><code>APP_PASSWORD_NOT_SET</code></td><td>403</td><td>existe no legado, sem senha de app</td></tr>
+<tr><td><code>APP_ACCESS_DISABLED</code></td><td>403</td><td><code>is_active = false</code></td></tr>
+<tr><td><code>USER_INACTIVE</code></td><td>403</td><td><code>user_status != 1</code></td></tr>
+<tr><td><code>OUTSIDE_ACCESS_HOURS</code></td><td>403</td><td><code>fl_hr_acesso = 1</code> e fora da janela</td></tr>
+<tr><td><code>BRANCH_OVERDUE</code></td><td>403</td><td>filial do dono com <code>filial_inadimplencia = 1</code></td></tr>
+<tr><td><code>CRM_ACCESS_DENIED</code></td><td>403</td><td>não está em <code>sis_filial_crm_usuario</code></td></tr>
+</tbody>
+</table>
+
+<p><strong>401 é credencial, 403 é "quem você é não pode entrar agora".</strong> Em 401 o app reabre o formulário; em 403 mostra o motivo e não insiste.</p>
+
+<blockquote class="is-warning">
+<p><strong>A credencial é conferida antes de qualquer regra de negócio</strong>, e e-mail inexistente gasta o mesmo tempo de CPU de uma senha errada. Sem isso o endpoint viraria um oráculo para descobrir quais e-mails existem.</p>
+</blockquote>
+
+<p>Duas regras do legado ficaram <strong>de fora</strong> por decisão: forçar troca de senha quando <code>user_last_access</code> é vazio, e aceite de termo de uso (<code>fl_termo_uso</code>) &mdash; exigiriam telas que o app ainda não tem.</p>
+
+<p>Uma regra <strong>diverge de propósito</strong>: janela de horário que cruza a meia-noite (22:00&rarr;06:00). O legado compara <code>agora &lt; inicio || agora &gt; fim</code>, sempre verdadeiro nesse caso, e tranca o plantão noturno para fora em qualquer horário.</p>
+
+<h2>4. Escopo do CRM &mdash; o <strong>E</strong> que não pode virar OU</h2>
+
+<p>Resolvido em <code>CrmScopeResolver</code>, <strong>a partir do usuário do token &mdash; nunca do que o cliente manda</strong>. A decisão pura fica em <code>crm_scope_rules.ts</code> e tem teste de unidade.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph TD
+  T["Token → user_id"]
+  V{"filial_crm_permissao = 1<br/>E<br/>filial_crm_usuario_permissao = 'vendedor'"}
+  F["escopo FILIAL<br/>uma filial, só os leads da pessoa"]
+  G["escopo GRUPO<br/>todas as filiais do dono"]
+  X["403 CRM_ACCESS_DENIED<br/>fora de sis_filial_crm_usuario"]
+  T --> V
+  V -->|"sim"| F
+  V -->|"qualquer outro caso"| G
+  T -.->|"sem vínculo de CRM"| X
+</code></pre>
+</div>
+
+<blockquote class="is-danger">
+<p><strong>É um E, não um OU.</strong> Afrouxar faz o vendedor ler a carteira da loja inteira. Metade da base cai em cada ramo, então o erro não apareceria num teste de fumaça.</p>
+</blockquote>
+
+<p>O escopo fica em cache por <strong>60s</strong> (<code>TTL_ESCOPO_SEGUNDOS</code>), porque ele é resolvido <em>antes</em> do cache de cada grupo e era a única consulta que sobrava numa tela já cacheada: uma por endpoint, cinco por abertura de painel.</p>
+
+<h3>4.1 O quadro não usa o escopo do painel</h3>
+
+<blockquote class="is-warning">
+<p>Conferido em <code>CrmController::indexAction:99-107</code> do legado: <strong>o board sempre fixa a filial</strong> da configuração de CRM do usuário, nos dois ramos de permissão. O painel no escopo <code>grupo</code> varre todas as filiais do dono; <strong>o quadro é de uma filial</strong>. Use <code>fragmentoEscopoKanban</code> em <code>crm_kanban_rules.ts</code> &mdash; não reuse o <code>#fragmentoEscopo</code> do painel.</p>
+</blockquote>
+
+<p>Consequência boa: <strong>não existe recusa por "lead de outra filial"</strong>, que o legado precisa conferir lead a lead. Como <code>fragmentoEscopoKanban</code> fixa <code>l.filial_id</code> nos dois ramos, um lead de outra loja responde <code>LEAD_NOT_FOUND</code> na primeira consulta e nunca chega na regra de negócio.</p>
+
+<h2>5. Leitura na réplica</h2>
+
+<p>Toda consulta de relatório sai por <code>db.connection('mysql', { mode: 'read' })</code>. Nesse modo o Lucid recusa insert/update/delete e <code>getWriteClient()</code> lança exceção &mdash; é a mesma invariante do <code>DashboardTable</code> do legado, que só recebe o adapter da réplica.</p>
+
+<blockquote class="is-danger">
+<p>A trava inspeciona o método do knex, então <strong>não pegaria um <code>UPDATE</code> escrito à mão dentro de um <code>rawQuery</code></strong>. A regra em <code>app/services/v1/crm/</code> é mais forte que a do framework: <strong>só SELECT</strong>.</p>
+</blockquote>
+
+<h2>6. Cache (Redis)</h2>
+
+<p>Em <strong>produção o Redis é exclusivo da API</strong>, no próprio <code>aplicaboom_api_docker_stack</code> &mdash; não mais o <code>redis-legado</code>. A troca foi possível porque nada era compartilhado: as chaves <code>apb:</code> são escritas e invalidadas só pelos caminhos de escrita daqui, e o legado nunca as lê.</p>
+
+<blockquote class="is-danger">
+<p><strong>No ambiente local o Redis é compartilhado, e o <code>db0</code> dele guarda as SESSÕES PHP</strong> (prefixo <code>legado-</code>). Por isso <code>db: 1</code> + <code>keyPrefix: 'apb:'</code> em <code>config/redis.ts</code>, e <strong>nunca <code>KEYS</code>, <code>SCAN</code> por pattern ou <code>FLUSHDB</code> no código</strong>. Invalidação é por TTL ou <code>DEL</code> de chave exata.</p>
+</blockquote>
+
+<h3>6.1 TTLs, e por que são diferentes</h3>
+
+<table>
+<thead><tr><th>Chave</th><th>TTL</th><th>Natureza do dado</th></tr></thead>
+<tbody>
+<tr><td>escopo do usuário</td><td><strong>60s</strong></td><td>permissão &mdash; não pode envelhecer</td></tr>
+<tr><td>painel, mês corrente</td><td>5 min</td><td>agregação &mdash; envelhece devagar</td></tr>
+<tr><td>painel, mês fechado</td><td>1 h</td><td>agregação que não muda mais</td></tr>
+<tr><td><code>crm:kanban:v{N}:*</code></td><td>60s</td><td>o quadro é fila de trabalho, não relatório</td></tr>
+<tr><td><code>crm:kanban:ref:f{filial}</code></td><td>300s</td><td>tag e coluna são configuração</td></tr>
+<tr><td><code>crm:kanban:ver:f{id}</code></td><td>sem TTL</td><td>o contador de versão</td></tr>
+<tr><td><code>GET kanban/versao</code></td><td>15s</td><td>feito para o app consultar em laço</td></tr>
+</tbody>
+</table>
+
+<blockquote class="is-warning">
+<p>Se um dia parecer boa ideia unificar as TTLs, o risco está no <strong>rebaixamento</strong>: um gerente que virou vendedor continua lendo a carteira da loja inteira até a entrada de escopo expirar.</p>
+</blockquote>
+
+<p>A chave do painel carrega o <strong>escopo inteiro</strong>, inclusive o e-mail do responsável: aqui a permissão muda a CONSULTA, então gerente e vendedor da mesma filial não podem compartilhar entrada.</p>
+
+<h3>6.2 Cache versionado do quadro</h3>
+
+<p><strong>Toda chave do quadro carrega a versão da filial.</strong> Uma escrita faz <code>INCR</code> e orfana colunas, páginas e combinações de filtro <strong>num comando só</strong>. É o substituto do <code>SCAN</code> por pattern, que é proibido. Custo: um <code>GET</code> no Redis por requisição.</p>
+
+<p>Antes disso a invalidação era parcial &mdash; um <code>DEL</code> na chave das colunas sem filtro &mdash; e <strong>as páginas de leads sobreviviam até 60s</strong>. A ação de um card disfarçava (a tela corrige o card na mão); a ação em lote recarregava e recebia o estado anterior. Era o bug de "fiz a ação e o quadro não mudou".</p>
+
+<h3>6.3 O que a revalidação enxerga, e o que não</h3>
+
+<p><code>GET kanban/versao</code> traz a <code>versao</code> (que só avança com escrita <strong>desta API</strong>, e serve ao segundo aparelho da mesma pessoa) e os <strong>contadores por coluna</strong> (que pegam o que o <strong>sistema web</strong> fez, porque escrita de lá não passa por aqui).</p>
+
+<p>Ela enxerga mudança de <strong>composição</strong>: lead novo, lead que trocou de coluna, lead que saiu do quadro. <strong>Não</strong> enxerga troca de temperatura, tag ou responsável feita na web. Foi escolha de custo, medida: <code>MAX(crm_lead_data_update)</code> por filial leva <strong>63&ndash;354 ms</strong> na maior loja da base (48 mil leads), porque não há índice que sirva e a coluna nem é <code>ON UPDATE</code>. A contagem agrupada é a MESMA consulta que a tela já faz, ~35 ms no mesmo pior caso, e ainda cacheada.</p>
+
+<h3>6.4 O que não é cacheado, de propósito</h3>
+
+<p>As duas consultas do guard (<code>auth_access_tokens</code> + <code>sis_user</code>, uma cada por requisição). <strong>Cachear o token quebraria a revogação imediata do logout</strong>, que é o motivo de o token ser opaco em vez de JWT. Com cache quente sobram essas duas por requisição &mdash; medido no log geral do MariaDB: <strong>10 consultas por abertura de tela, contra 15 antes do cache de escopo</strong>.</p>
+
+<p>E <code>permissoes.alterar_responsavel</code> viaja em <code>GET kanban/colunas</code> <strong>fora do cache</strong>: a chave do escopo <code>grupo</code> é <code>g{userIdMaster}</code>, compartilhada por todo mundo do mesmo dono, e guardar o flag lá dentro mostraria o botão para quem o endpoint vai recusar.</p>
+
+<p>O <code>remember</code> (ler, ou executar e gravar, degradando se o Redis não responder) mora em <code>app/services/v1/support/cache.ts</code>. <strong>A exceção de quem produz o valor propaga e nada é gravado</strong> &mdash; é o que mantém <code>CrmAccessDenied</code> fora do cache: quem for habilitado no CRM entra na requisição seguinte, sem esperar TTL. Redis fora do ar não derruba endpoint: cai na consulta e loga aviso.</p>
+
+<blockquote class="is-info">
+<p>Quando o app ganhar a tela de <strong>gerenciar CRM</strong>, salvar configuração da IA vai precisar limpar chave <em>dos outros</em>: <code>filial_ia:&lt;filial&gt;</code> e <code>loja_ai:&lt;filial&gt;</code> (boomia) e <code>uid-&lt;user&gt;-crm-filial-cfg</code> / <code>uid-&lt;user&gt;-menu</code> (legado). Isso é uma <strong>segunda conexão</strong> no mapa de <code>config/redis.ts</code>, só para <code>DEL</code> de chave exata &mdash; e não motivo para trazer o cache daqui de volta para o servidor do legado.</p>
+</blockquote>
+
+<h2>7. Ações em lote</h2>
+
+<p><strong>Uma requisição, não uma por lead.</strong> Na web o navegador dispara um <code>POST /crm/update</code> por lead num <code>Promise.all</code>; marcar 40 cards no celular não pode virar 40 requisições em rede móvel.</p>
+
+<p><strong>Resposta 200 mesmo com falha</strong> &mdash; <code>{atualizados, solicitados, falhas[]}</code>. Dos 8 marcados, 2 estarem em coluna final não invalida os outros 6; é o contrato <code>{updated, errors}</code> do legado. <code>CrmLoteDenied</code> (403/422) é o outro caso: recusa da requisição inteira, antes de escrever qualquer coisa.</p>
+
+<blockquote class="is-danger">
+<p><strong>Uma transação POR LEAD, sequencial.</strong> Transação única em volta de 100 leads faria o lote todo voltar atrás por causa de um, e seguraria as linhas da loja enquanto o resto do CRM escreve. <code>Promise.all</code> competiria com o <code>app.boomsistemas.com.br</code> pelo pool de escrita.</p>
+</blockquote>
+
+<ul>
+<li><strong>etapa / temperatura</strong>: o <code>status_key</code> é resolvido <strong>por lead</strong>, contra a filial daquele lead &mdash; é o que faz o lote funcionar quando a seleção mistura lojas do mesmo dono.</li>
+<li><strong>responsáveis</strong>: <strong>só gerente</strong>, e nunca em filial com <code>filial_crm_tipo = 2</code> (distribuição automática). <strong>Substitui</strong> os atuais. A regra olha <code>filial_crm_usuario_permissao</code> <strong>sozinha</strong> &mdash; não cruza com <code>filial_crm_permissao</code>, igual ao legado.</li>
+<li><strong>tags</strong>: <strong>somam</strong>, sem recorte de permissão. Sem log: o enum de <code>crm_lead_log_type</code> não tem valor para tag (conferido com <code>DESCRIBE</code>).</li>
+<li><strong>Teto de 100 leads e 50 destinos por chamada</strong>. Não existe no legado, onde o navegador segura a fila.</li>
+</ul>
+
+<h2>8. Criação de lead</h2>
+
+<p><strong>Nada de referência nova para abrir o formulário.</strong> Etapa, plataforma e possibilidade de fechamento já viajam em <code>GET kanban/colunas</code>. A única requisição do formulário é a busca no estoque, e só quando a pessoa digita.</p>
+
+<p><strong>O corpo não decide filial nem autor</strong> &mdash; os dois saem do token, como no legado. Etapa e plataforma vão por <strong>key</strong>, nunca por id: <code>sis_crm_status</code> é por filial e as origens são recortadas por <code>filial_crm_canais</code>.</p>
+
+<table>
+<thead><tr><th>Recusa</th><th>HTTP</th><th>Regra</th></tr></thead>
+<tbody>
+<tr><td><code>LEAD_DUPLICADO</code></td><td>409</td><td>lead ativo da mesma filial com mesmo e-mail <strong>ou</strong> telefone</td></tr>
+<tr><td><code>STATUS_FINAL</code></td><td>422</td><td>etapa final não aceita lead novo</td></tr>
+<tr><td><code>ORIGEM_INVALIDA</code></td><td>422</td><td>plataforma fora de <code>filial_crm_canais</code></td></tr>
+<tr><td><code>DATA_FORA_DA_JANELA</code></td><td>422</td><td>janela de ±2 anos</td></tr>
+</tbody>
+</table>
+
+<p>O telefone é normalizado dos dois lados &mdash; <code>normalizarTelefone</code> é o porte literal de <code>telefoneNormalize</code> (<code>config/helpers.php:640</code>), e celular de 11 dígitos também procura a forma antiga sem o nono.</p>
+
+<blockquote class="is-warning">
+<p><strong>A data é hora de parede</strong> (<code>YYYY-MM-DDTHH:mm</code>, sem fuso) e é gravada crua, como o legado grava o valor do <code>datetime-local</code>. Converter para UTC deslocaria o lead três horas em relação ao mesmo lead criado pela web.</p>
+</blockquote>
+
+<p>O <strong>CarChat</strong> (<code>carchat_service.ts</code>, porte do bloco "CARCHAT BUG FIX") roda <strong>fora da transação e nunca lança</strong>: o lead já está gravado quando ela acontece.</p>
+
+<h2>9. Divergências deliberadas do legado</h2>
+
+<p>Estão listadas aqui juntas porque cada uma é uma decisão que alguém vai querer "consertar" um dia.</p>
+
+<table>
+<thead><tr><th>Onde</th><th>Aqui</th><th>No legado</th><th>Por quê</th></tr></thead>
+<tbody>
+<tr><td>Ordenação da coluna</td><td><code>crm_lead_data_update DESC, crm_lead_id DESC</code></td><td>só pela data</td><td>com empate na data, lead repete e lead desaparece entre páginas</td></tr>
+<tr><td>Lead fora do escopo</td><td>404 <code>LEAD_NOT_FOUND</code></td><td>200 com <code>msg: "Sem Permissao"</code></td><td>a resposta do legado confirma a existência do lead para quem não pode vê-lo</td></tr>
+<tr><td>Tag em lote</td><td><code>WHERE NOT EXISTS</code></td><td><code>INSERT IGNORE</code></td><td><code>sis_crm_lead_tag</code> <strong>não tem índice único</strong> (<code>SHOW INDEX</code>): o <code>IGNORE</code> não ignora nada e duplica a linha</td></tr>
+<tr><td><code>filial_crm_usuario_cont</code></td><td>com <code>filial_crm_id</code> no WHERE</td><td>só por <code>user_id</code></td><td>o legado marca o vínculo da pessoa em todas as filiais dela</td></tr>
+<tr><td>Log de atribuição</td><td>ator = quem marcou, <code>para</code> = quem recebeu</td><td>os dois iguais</td><td>o método nasceu na distribuição automática</td></tr>
+<tr><td>Log de criação</td><td>grava <code>lead</code>/<code>cadastrou</code></td><td>só registra no UPDATE</td><td>sem isso o histórico começa no meio e o suporte não sabe quem cadastrou</td></tr>
+<tr><td><code>veiculo_id</code></td><td>conferido contra o estoque alcançável</td><td>insere o id do POST sem checagem</td><td>o que a busca oferece é o que a criação aceita</td></tr>
+<tr><td>Ticket</td><td><code>MAX + 1</code> sem <code>FOR UPDATE</code></td><td>&mdash;</td><td><code>FOR UPDATE</code> trancaria a faixa inteira do índice (48 mil registros) enquanto a web escreve. A trava certa é um unique <code>(filial_id, crm_lead_ticket)</code>, que é mudança de schema</td></tr>
+<tr><td>Funil por status</td><td>leads ativos por <code>crm_status_key</code></td><td>não existe &mdash; status é só filtro</td><td>definição desta API; <strong>nunca</strong> por <code>crm_status_id</code>, que é por filial</td></tr>
+<tr><td>Cards da Boomia</td><td>ignoram origem e responsável</td><td>também ignora</td><td>replicado <strong>de propósito</strong> para os números baterem com a web</td></tr>
+</tbody>
+</table>
+
+<h2>10. Produção</h2>
+
+<p>Imagem construída, não montada: <code>Dockerfile</code> multi-estágio (build com as devDependencies, execução só com o JavaScript compilado), rodando como usuário <code>node</code> com <strong><code>dumb-init</code> como PID 1</strong> &mdash; sem ele o Node não encerra o pool de banco no <code>docker stop</code> e cada deploy deixa conexão pendurada no RDS.</p>
+
+<ul>
+<li><strong>Node 22 (LTS) na imagem, 25 no docker-compose de desenvolvimento.</strong> A 25 é a linha "Current" e sai de suporte antes de virar LTS.</li>
+<li><strong><code>tests/</code> fica no contexto do Docker.</strong> <code>bin/test.ts</code> importa <code>tests/bootstrap.js</code> e o <code>tsc</code> do <code>node ace build</code> compila os dois &mdash; excluir a pasta quebra o build com <code>Cannot find module</code>.</li>
+<li>O container escuta no <strong>IP privado</strong> na 3334, não em <code>0.0.0.0</code> nem no loopback. Loopback não serviria porque o Kong está em outra EC2; <code>0.0.0.0</code> deixaria <code>/v1/auth/login</code> exposto direto, sem rate limit.</li>
+<li>A máquina tem <strong>908 MB de RAM e precisa de swap</strong> &mdash; o <code>node ace build</code> não cabe sem ele.</li>
+</ul>
+
+<p>Verificação rápida de que ela está no ar (as duas rotas públicas):</p>
+
+<pre><code>$ curl -s https://api.boomsistemas.com.br/aplicaboom/v1/app/versao
+{"versao_app_requerida":"1.0.0","versao_api":"2026.09.03.0"}
+
+$ curl -s -X POST https://api.boomsistemas.com.br/aplicaboom/v1/auth/login \
+    -H 'Content-Type: application/json' -d '{"email":"x@x","password":"x"}'
+{"code":"INVALID_CREDENTIALS","message":"E-mail ou senha incorretos."}</code></pre>
+
+<blockquote class="is-warning">
+<p><strong>O <code>CLAUDE.md</code> do repositório tem duas frases anteriores ao deploy.</strong> Uma diz que o <code>env/prod.json</code> do app aponta para <code>aplicaboom-api.boomsistemas.com.br</code> &mdash; ele aponta para o caminho no Kong, verificado em 14/09/2026. A outra diz que as duas migrations nunca rodaram em produção; isso <strong>não dá para confirmar de fora</strong>, porque <code>/v1/app/versao</code> não toca banco de propósito e um login com senha errada responde 401 antes de precisar de <code>auth_access_tokens</code>. Confirme no servidor com <code>migration:status</code> antes de prometer login em produção.</p>
+</blockquote>
+
+<h2>11. Pendências conhecidas</h2>
+
+<ul>
+<li><strong>Sem push e sem socket.</strong> O legado dispara <code>sendNotificationLead</code> e <code>emitConversationUpdate</code> ao atribuir responsável; aqui não. <strong>Quem recebe lead por atribuição em lote feita pelo app não é avisado</strong>, e pela web é. Pendência conhecida, não esquecimento.</li>
+<li><strong>O cache de totais do legado não é invalidado por esta API.</strong> A web usa <code>crm-totals-{filial}-*</code> e limpa por pattern; não podemos varrer pattern nem tocar no <code>db0</code>. Mover um lead pelo aplicativo deixa o contador da web velho até o TTL de lá expirar.</li>
+<li><strong>A senha de app depende do <code>app.boomsistemas.com.br</code>.</strong> O gerenciamento dessa senha é de lá, e essa parte está parada aguardando a tarefa do Cesar. Enquanto isso o login local só funciona com registro semeado à mão.</li>
+<li><strong>Convenções ao criar rota nova</strong>: controllers em <code>app/controllers/v1/modules/&lt;modulo&gt;/</code>, models em <code>app/models/v1/</code>, validators (VineJS) em <code>app/validators/v1/</code>, mensagens pt-BR em <code>resources/lang/pt-BR/validator.json</code>, e o Swagger sai dos JSDoc (<code>@summary</code>, <code>@tag</code>, <code>@responseBody</code>) &mdash; não de arquivo separado.</li>
+</ul>

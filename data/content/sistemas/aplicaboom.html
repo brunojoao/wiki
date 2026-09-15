@@ -1,0 +1,361 @@
+<!--
+title: AplicaBoom - Aplicativo Flutter
+description: App mobile em Flutter: comandos do Makefile, flavors e endereco da API, arquitetura por feature e as armadilhas que ja custaram tempo do time.
+published: 1
+date: 2026-09-15T01:09:17.155Z
+tags: aplicaboom, arquitetura, crm, flutter, dart, mobile, app
+editor: ckeditor
+dateCreated: 2026-09-15T01:09:17.155Z
+-->
+
+<h1>AplicaBoom &mdash; Aplicativo Flutter</h1>
+
+<p>Aplicativo mobile em <strong>Flutter/Dart</strong> (Android e iOS), no repositório <code>Projects/aplicaboom</code>. Ele consome <strong>exclusivamente</strong> a <a href="/apis/aplicaboom-api">AplicaBoom API</a> &mdash; não fala com <code>app.boomsistemas.com.br</code>, <code>boomia</code> nem <code>api.boomsistemas.com.br</code> diretamente. Se o app precisar de dado de outro serviço da stack, quem faz a ponte é a API dele.</p>
+
+<p>Esta página é o que você precisa saber para trabalhar no app: os comandos, onde ele aponta em cada ambiente, como a arquitetura é organizada e as armadilhas que já custaram tempo do time. A API tem página própria; a infraestrutura de produção está em <a href="/infraestrutura/arquitetura">Arquitetura de Infraestrutura</a>.</p>
+
+<div style="display:flex; justify-content:center; margin: 2rem 0;">
+<pre><code class="language-mermaid">
+graph LR
+  APP["aplicaboom<br/>Flutter · Android e iOS"]
+  KONG["Kong<br/>api.boomsistemas.com.br<br/>prefixo /aplicaboom"]
+  API["aplicaboom_api<br/>AdonisJS 6"]
+  M[("RDS master<br/>escrita")]
+  R[("Réplica<br/>relatório")]
+  RED[("Redis apb:<br/>cache")]
+  LEG["app.boomsistemas.com.br<br/>sistema web legado"]
+
+  APP -->|"HTTPS · token opaco"| KONG --> API
+  API --> M
+  API --> R
+  API --> RED
+  LEG -.->|"mesma base"| M
+</code></pre>
+</div>
+
+<h2>1. Comandos</h2>
+
+<p>Tudo passa pelo <code>Makefile</code> da raiz. <code>make</code> sozinho lista os alvos.</p>
+
+<table>
+<thead><tr><th>Comando</th><th>O que faz</th><th>API que ele usa</th></tr></thead>
+<tbody>
+<tr><td><code>make setup</code></td><td><code>pub get</code> + geradores &mdash; primeira coisa num clone novo</td><td>&mdash;</td></tr>
+<tr><td><code>make gen</code></td><td>geradores (freezed, json_serializable, riverpod)</td><td>&mdash;</td></tr>
+<tr><td><code>make watch</code></td><td>os mesmos geradores em modo contínuo</td><td>&mdash;</td></tr>
+<tr><td><code>make run</code></td><td>emulador Android</td><td><code>10.0.2.2:3334</code></td></tr>
+<tr><td><code>make run-desktop</code></td><td><strong>Linux desktop &mdash; é o padrão do dia a dia</strong></td><td><code>127.0.0.1:3334</code></td></tr>
+<tr><td><code>make run-lan</code></td><td>celular físico contra a API <em>desta</em> máquina</td><td><code>http://&lt;IP da máquina&gt;:3334</code></td></tr>
+<tr><td><code>make run-prod</code></td><td>produção em <code>--release</code></td><td><code>api.boomsistemas.com.br/aplicaboom</code></td></tr>
+<tr><td><code>make test</code></td><td>a suíte inteira</td><td>&mdash;</td></tr>
+<tr><td><code>make coverage</code></td><td>testes + <code>coverage/lcov.info</code></td><td>&mdash;</td></tr>
+<tr><td><code>make analyze</code></td><td>análise estática</td><td>&mdash;</td></tr>
+<tr><td><code>make format</code> / <code>make fix</code></td><td>formata / aplica as correções do analisador</td><td>&mdash;</td></tr>
+<tr><td><code>make clean</code></td><td>limpa build <strong>e apaga o código gerado</strong></td><td>&mdash;</td></tr>
+<tr><td><code>make build-apk</code></td><td>APK universal de produção (~59 MB), para teste interno</td><td>produção</td></tr>
+<tr><td><code>make build-apk-split</code></td><td>APKs por arquitetura, bem menores</td><td>produção</td></tr>
+<tr><td><code>make build-appbundle</code></td><td>AAB para a Play Store</td><td>produção</td></tr>
+<tr><td><code>make build-ios</code></td><td>build iOS (exige macOS)</td><td>produção</td></tr>
+<tr><td><code>make doctor</code></td><td><code>flutter doctor -v</code></td><td>&mdash;</td></tr>
+</tbody>
+</table>
+
+<p>O <code>HOST_IP</code> do <code>run-lan</code> é descoberto na hora com <code>hostname -I</code>, porque muda de rede para rede. Um celular físico não alcança <code>127.0.0.1</code> (que é dele mesmo) nem <code>10.0.2.2</code> (apelido que só existe dentro do emulador).</p>
+
+<h3>1.1 Depurar contra produção</h3>
+
+<p>O <code>run-prod</code> sobe em <code>--release</code>: <strong>sem hot reload, sem DevTools e com stack trace ofuscado pelo R8</strong>. Para depurar de verdade contra a API de produção, é o mesmo <code>env/prod.json</code> sem o <code>--release</code>:</p>
+
+<pre><code>flutter run --dart-define-from-file=env/prod.json -t lib/main_prod.dart</code></pre>
+
+<blockquote class="is-warning">
+<p>São <strong>dados reais</strong>. Criar lead, mover card e ação em lote gravam no CRM de produção. O selo <code>PROD</code> no cabeçalho do menu e na tela de login é a única pista visual &mdash; em produção o endereço da API é omitido de propósito.</p>
+</blockquote>
+
+<p>Existe um alvo <code>make run-prod-debug</code> com essa receita (e um <code>DEVICE=</code> opcional, porque com Linux, Chrome e celular ligados o <code>flutter run</code> para para perguntar qual usar). Ele entrou em <strong>14/09/2026</strong>: se não estiver no seu clone, use a linha acima.</p>
+
+<h3>1.2 O SDK certo, e o snap que atrapalha</h3>
+
+<p>O projeto foi criado com <strong>Flutter 3.47.2 / Dart 3.13.2</strong>, instalado em <code>~/development/flutter</code>. Existe um <strong>snap do Flutter 3.19</strong> em <code>/snap/bin</code> que <strong>não</strong> atende o projeto (o <code>pubspec</code> exige Dart <code>^3.13.2</code>).</p>
+
+<p>O <code>~/.bashrc</code> põe o SDK certo na frente do PATH, mas <strong>shell não-interativo não lê esse bloco</strong> &mdash; então qualquer comando disparado por ferramenta (<code>bash -c</code>, script de CI, agente) pega o snap e falha com erro de versão de SDK. Nesses contextos, prefixe sempre:</p>
+
+<pre><code>export PATH="$HOME/development/flutter/bin:$PATH"</code></pre>
+
+<h3>1.3 Onde rodar: desktop, emulador ou celular</h3>
+
+<table>
+<thead><tr><th>Alvo</th><th>Quando usar</th><th>Custo</th></tr></thead>
+<tbody>
+<tr><td><strong>Linux desktop</strong></td><td>UI, login, tema, rotas, HTTP, testes &mdash; a maior parte do trabalho</td><td>nenhum</td></tr>
+<tr><td><strong>Emulador Android</strong></td><td>câmera, push FCM, permissões, vídeo</td><td>~2,4 GB de RAM; suba com <code>-gpu host</code></td></tr>
+<tr><td><strong>Celular físico</strong></td><td>o mesmo do emulador, sem o custo de RAM</td><td>depende de ADB funcionando</td></tr>
+</tbody>
+</table>
+
+<p>Os plugins <code>camera</code>, <code>firebase_core</code>, <code>firebase_messaging</code>, <code>permission_handler</code> e <code>video_player</code> <strong>não têm implementação Linux</strong>: no desktop eles lançam <code>MissingPluginException</code> em runtime. É a lista do que obriga a sair do desktop.</p>
+
+<p>No emulador, <code>-gpu host</code> não é detalhe: com o renderizador por software o emulador consome 214% de CPU, contra 10% usando a GPU.</p>
+
+<pre><code>emulator -avd Pixel_3a_API_34_extension_level_7_x86_64 \
+  -gpu host -memory 2048 -cores 2 -no-boot-anim -no-snapshot-save</code></pre>
+
+<blockquote class="is-info">
+<p><strong>Celular físico que não aparece no <code>adb devices</code>:</strong> lista vazia é diferente de <code>unauthorized</code>. <code>unauthorized</code> significa que falta aceitar a chave RSA na tela; <strong>lista vazia significa que o aparelho não está expondo ADB nenhum</strong> &mdash; confira se a depuração USB está mesmo ligada (<code>lsusb -v</code> deve mostrar uma interface classe 255, subclasse 66, além da de MTP). Em aparelho que não coopera por USB, a <strong>depuração sem fio</strong> do Android 11+ resolve: parear com código, e depois <code>adb connect</code> na porta que o <code>adb mdns services</code> informar &mdash; ela é <em>diferente</em> da porta de pareamento.</p>
+</blockquote>
+
+<h2>2. Ambientes e o endereço da API</h2>
+
+<p>O endereço não vem de <code>.env</code> lido em runtime: vem de <code>String.fromEnvironment</code>, assado no bundle pelo <code>--dart-define-from-file</code>. É de propósito &mdash; <strong>o que é compilado no bundle é legível por qualquer pessoa que abra o APK</strong>.</p>
+
+<table>
+<thead><tr><th>Arquivo</th><th><code>API_BASE_URL</code></th><th>Entrypoint</th><th>Estado</th></tr></thead>
+<tbody>
+<tr><td><code>env/dev.json</code></td><td><code>http://10.0.2.2:3334</code></td><td><code>main_dev.dart</code></td><td>emulador</td></tr>
+<tr><td><code>env/dev_desktop.json</code></td><td><code>http://127.0.0.1:3334</code></td><td><code>main_dev.dart</code></td><td>desktop</td></tr>
+<tr><td><code>env/prod.json</code></td><td><code>https://api.boomsistemas.com.br/aplicaboom</code></td><td><code>main_prod.dart</code></td><td><strong>no ar</strong></td></tr>
+<tr><td><code>env/staging.json</code></td><td><code>https://staging.aplicaboom-api.boomsistemas.com.br</code></td><td><code>main_staging.dart</code></td><td><strong>não existe</strong></td></tr>
+</tbody>
+</table>
+
+<p><strong>Trocar de ambiente exige recompilar.</strong> Não há como apontar o app instalado para outro servidor.</p>
+
+<blockquote class="is-warning">
+<p><strong>A API vive num CAMINHO do gateway, não num subdomínio.</strong> Não existe <code>aplicaboom-api.boomsistemas.com.br</code> &mdash; a ideia foi descartada em set/2026 (exigiria certificado ACM, SNI no listener do <code>kong-elb</code> e registro no Route 53 para um host que só o app consome). E <strong>só HTTPS</strong>: <code>http://api.boomsistemas.com.br/aplicaboom</code> não responde, porque nenhum dos dois balanceadores tem listener na porta 80.</p>
+</blockquote>
+
+<blockquote class="is-danger">
+<p><strong>O prefixo faz parte da base, e as rotas de <code>ApiEndpoints</code> começam com <code>/</code>.</strong> O Dio concatena os dois (<code>.../aplicaboom</code> + <code>/v1/auth/login</code>); rota sem a barra inicial grudaria no prefixo e viraria <code>.../aplicaboomv1/...</code>. Uma "limpeza" que tirasse as barras quebraria produção inteira, e nenhum outro teste perceberia &mdash; todos usam base sem caminho. Há teste prendendo isso em <code>test/core/network/api_base_url_test.dart</code>.</p>
+</blockquote>
+
+<h3>2.1 O selo de ambiente</h3>
+
+<p><code>AmbienteBadge</code> (<code>shared/widgets/ambiente_badge.dart</code>) é uma pilha com bolinha e o nome curto do flavor, no cabeçalho do menu lateral e na tela de login.</p>
+
+<p><strong>Ele aparece em TODOS os flavors, produção inclusive.</strong> Um selo que some em produção não distingue "é produção" de "esqueceram de colocar o selo" &mdash; e depois de instalados os builds são idênticos por fora: mesmo ícone, mesmo nome, mesmo <code>applicationId</code>. O endereço da API acompanha o selo só <strong>fora</strong> de produção, onde a pergunta costuma ser "estou batendo no emulador ou na máquina?".</p>
+
+<p>O banner <code>DEBUG</code> do Material não resolve isso: ele diz se o build é de depuração, não para qual servidor aponta &mdash; um release do flavor dev não mostra banner nenhum.</p>
+
+<h3>2.2 Versão exigida pela API</h3>
+
+<p>Antes de qualquer tela, inclusive do login, o app consulta <code>GET /v1/app/versao</code> (pública, sem banco e sem Redis) e compara <code>versao_app_requerida</code> com a própria versão do <code>pubspec.yaml</code>. Divergiu, ele bloqueia a tela pedindo atualização. <code>null</code> significa "não exijo versão".</p>
+
+<pre><code>$ curl -s https://api.boomsistemas.com.br/aplicaboom/v1/app/versao
+{"versao_app_requerida":"1.0.0","versao_api":"2026.09.03.0"}</code></pre>
+
+<blockquote class="is-warning">
+<p>Só preencha <code>APP_VERSION_REQUIRED</code> em produção com uma versão <strong>já publicada na loja</strong>: ninguém consegue atualizar para uma versão que não existe, e o efeito seria trancar a base inteira do lado de fora.</p>
+</blockquote>
+
+<h2>3. Arquitetura</h2>
+
+<p><strong>Clean Architecture organizada por feature</strong>, com Riverpod fazendo injeção de dependência e estado. As dependências apontam para dentro: <code>presentation</code> &rarr; <code>domain</code> &larr; <code>data</code>, e todas as três podem usar <code>core</code>.</p>
+
+<table>
+<thead><tr><th>Camada</th><th>Pode importar</th><th>Não conhece</th></tr></thead>
+<tbody>
+<tr><td><code>domain/</code></td><td>nada do projeto</td><td>Dio, SharedPreferences, Flutter</td></tr>
+<tr><td><code>data/</code></td><td><code>domain</code>, <code>core</code></td><td><code>presentation</code></td></tr>
+<tr><td><code>presentation/</code></td><td><code>domain</code>, <code>core</code></td><td><code>data</code> &mdash; fala por caso de uso</td></tr>
+<tr><td><code>core/</code></td><td><code>core</code></td><td><strong><code>features</code>, nunca</strong></td></tr>
+</tbody>
+</table>
+
+<p><strong><code>core</code> nunca importa <code>features</code></strong> é a regra mais fácil de quebrar sem perceber; quando isso acontece, <code>core</code> vira refém de uma feature e o projeto perde a possibilidade de testar em partes. O <code>SessionManager</code> ilustra: ele mora em <code>core/session</code> e não em <code>features/auth</code>, porque o interceptor HTTP (que é <code>core</code>) precisa dele.</p>
+
+<h3>3.1 A trilha do erro</h3>
+
+<p>Uma trilha só, do socket até a tela:</p>
+
+<pre><code>DioException
+   ▼ ErrorInterceptor
+AppException          (NetworkException, ServerException, ...)
+   ▼ mapExceptionToFailure, na fronteira do repositório
+Failure               (NetworkFailure, AuthFailure, ...)
+   ▼ AsyncValue.guard
+AsyncError            capturado pelo Riverpod
+   ▼
+ErrorView             switch exaustivo sobre o Failure</code></pre>
+
+<p>Duas decisões explicam o formato: <strong>repositórios lançam <code>Failure</code>, não devolvem <code>Result</code></strong> (o <code>AsyncValue</code> já carrega o erro até a UI; empilhar um <code>Result</code> por cima seria escrever duas vezes o mesmo tratamento), e <strong><code>Failure</code> é <code>sealed</code></strong> &mdash; criar um tipo novo de falha quebra a compilação até alguém decidir como ele aparece para o usuário.</p>
+
+<h3>3.2 Estado e navegação</h3>
+
+<ul>
+<li>Todos os providers usam geração de código (<code>@riverpod</code>). <code>@Riverpod(keepAlive: true)</code> para serviços e repositórios; <code>@riverpod</code> (autoDispose) para controllers de tela &mdash; é o que garante que a câmera libere o hardware ao sair da tela.</li>
+<li>Providers expõem <strong>tipos abstratos</strong> (<code>AuthRepository</code>, nunca <code>AuthRepositoryImpl</code>), o que permite trocar a implementação inteira num teste com <code>overrideWithValue</code>.</li>
+<li><strong>Nenhuma tela navega depois de autenticar.</strong> A tela de login só muda o estado; quem decide o destino é o <code>redirect</code> do <code>go_router</code>. Duas fontes de navegação competindo é a causa clássica de tela piscando e pilha corrompida.</li>
+<li>O router é criado <strong>uma vez</strong>; mudanças de sessão chegam por <code>refreshListenable</code>. Recriar o router a cada login apagaria o histórico.</li>
+</ul>
+
+<h3>3.3 Refresh de token concorrente</h3>
+
+<p>O <code>AuthInterceptor</code> anexa o <code>Bearer</code> e, no 401, renova a sessão e repete a requisição. O detalhe que importa: várias requisições podem receber 401 ao mesmo tempo. A renovação fica guardada num <code>Future</code> compartilhado &mdash; a primeira falha dispara o refresh, as demais aguardam o mesmo resultado. Sem isso, N requisições paralelas disparariam N refreshes e o backend invalidaria o token.</p>
+
+<p>E o cliente que faz o refresh (<code>DioFactory.createPlainClient</code>) <strong>não tem</strong> o <code>AuthInterceptor</code>: se tivesse, um 401 no próprio refresh dispararia outro refresh, em recursão.</p>
+
+<h2>4. Design System</h2>
+
+<p>Tokens extraídos do Figma <strong>App Boom</strong>. <code>lib/core/theme/</code> tem <code>AppColors</code> (nomes espelham as variáveis do Figma), <code>AppTypography</code> (Inter nos títulos, Mulish no corpo), <code>AppSpacing</code>/<code>AppRadius</code>/<code>AppSizes</code> e <code>AppSemanticColors</code> &mdash; extensão de tema para sucesso/aviso/informação, que o <code>ColorScheme</code> do Material não cobre.</p>
+
+<p><code>lib/shared/design_system/</code> guarda os componentes que espelham o Figma e não conhecem <code>Failure</code> nem Riverpod; <code>lib/shared/widgets/</code> fica com os widgets de aplicação (<code>ErrorView</code>, <code>AsyncValueView</code>). Catálogo visual em <code>/dev/design-system</code>, registrado <strong>só no flavor dev</strong>, alcançável pelo botão no rodapé do login.</p>
+
+<blockquote class="is-info">
+<p>O <code>ColorScheme</code> é montado <strong>campo a campo</strong>, não por <code>ColorScheme.fromSeed</code> &mdash; o algoritmo tonal do Material 3 devolveria primos das cores do Figma, não elas.</p>
+</blockquote>
+
+<p>Pendências conhecidas: raios de borda não confirmados no Figma; a cor de aviso não existe no layout (o âmbar atual está marcado como não-oficial); e branco sobre o ciano <code>#009FE3</code> dá 2,9:1, <strong>abaixo do WCAG AA</strong>.</p>
+
+<h2>5. Autenticação</h2>
+
+<p>O app usa uma <strong>senha própria</strong>, separada da senha do sistema web. O motivo: o <code>app.boomsistemas.com.br</code> autentica contra <code>sis_user</code> com <strong>MD5 sem salt</strong> (<code>Module.php:734</code>, <code>DbTableAuthAdapter</code> com <code>'MD5(?)'</code>), e as 13.196 senhas do banco têm exatamente 32 caracteres. Levar esse esquema para dentro de um aplicativo distribuído transformaria um problema conhecido num problema maior.</p>
+
+<p>A credencial mora em <code>sis_user_app_auth</code> (hash <code>scrypt</code>); <code>sis_user</code> continua sendo a <strong>referência de identidade e de acesso</strong> &mdash; <code>user_id</code>, <code>grupo_acesso_id</code> e <code>filial_id</code> saem de lá. O contrato das rotas e os códigos de recusa estão na <a href="/apis/aplicaboom-api">página da API</a>.</p>
+
+<p>Do lado do app, o que importa: o corpo do erro traz um <code>code</code> estável, e o app decide por ele sem comparar texto. <strong>401 é credencial</strong> (reabre o formulário); <strong>403 é "quem você é não pode entrar agora"</strong> (mostra o motivo e não insiste).</p>
+
+<h3>5.1 O erro de login fica na tela</h3>
+
+<p><strong>Não é snackbar.</strong> Era, com 4 segundos de duração, e a queixa que chegava era "não entra e não diz por quê": numa falha de rede a espera pode chegar aos 20s do <code>connectTimeout</code>, e quem tocasse em Entrar e olhasse para o lado voltava a um formulário sem explicação.</p>
+
+<p>A faixa sai do próprio <code>authState</code>, sem cópia no <code>State</code>: some sozinha quando a tentativa seguinte começa (<code>isLoading</code>) ou dá certo (<code>AsyncData</code>).</p>
+
+<h2>6. O que já está portado do CRM</h2>
+
+<table>
+<thead><tr><th>Tela</th><th>Rota</th><th>Espelha</th></tr></thead>
+<tbody>
+<tr><td>Painel</td><td><code>/crm/dashboard</code></td><td><code>app.boomsistemas.com.br/crm/dashboard</code></td></tr>
+<tr><td>Leads (quadro)</td><td><code>/crm/leads</code></td><td>o quadro do <code>/crm</code></td></tr>
+<tr><td>Novo Lead</td><td>FAB do quadro</td><td><code>crm/novo.phtml</code></td></tr>
+<tr><td>Conversas, Agenda, Mercado</td><td>abas registradas</td><td><strong>não existem</strong> &mdash; abrem <code>CrmEmBreveScreen</code></td></tr>
+</tbody>
+</table>
+
+<p>As três abas vazias estão registradas de propósito: aba que não navega para nada parece defeito, e a barra do layout tem as cinco.</p>
+
+<p>As abas vivem numa <code>StatefulShellRoute.indexedStack</code>, cada uma com pilha própria &mdash; trocar de aba e voltar preserva a rolagem do quadro e não refaz as requisições.</p>
+
+<h3>6.1 Decisões de tela que valem saber</h3>
+
+<ul>
+<li><strong>Um controller por grupo de dados, não por card.</strong> Cinco widgets do painel saem da mesma varredura; cada bloco carrega com seu próprio esqueleto, falha com seu próprio <code>InlineErrorView</code> e refaz só a si mesmo.</li>
+<li><strong>O quadro é um carrossel de uma coluna por página</strong> (<code>viewportFraction: 0.92</code>, para a coluna seguinte espiar na borda). A paginação é <strong>por coluna</strong>: a pessoa pode estar na terceira página de "Novo lead" e na primeira de "Negociação".</li>
+<li><strong>Sem arrastar e soltar.</strong> No celular o gesto horizontal é do carrossel; arrastar o card competiria com ele. Mover é por ação explícita.</li>
+<li><strong>O <code>#</code> do card é o <code>crm_lead_ticket</code></strong>, não o id. O badge de tempo é o tempo desde a <strong>última interação</strong>, não tempo na etapa &mdash; o legado calcula assim, e tempo na etapa exigiria histórico de status, que não existe no banco.</li>
+<li><strong>O quadro se atualiza sozinho</strong> por três gatilhos: laço de 20s com a aba na frente, volta do segundo plano e puxar para atualizar. O laço pergunta <code>GET kanban/versao</code> e compara com a resposta anterior &mdash; <strong>a primeira conferida nunca recarrega</strong>, senão o quadro se recarregaria sozinho ao abrir.</li>
+<li><strong>Ação em lote recarrega o quadro inteiro</strong>, diferente das ações de um card, que corrigem o card na hora: a seleção atravessa colunas e o servidor devolve uma contagem, não os cards.</li>
+<li><strong>O botão "Responsável" só aparece para gerente</strong>, via <code>permissoes.alterar_responsavel</code> que o servidor manda junto com as colunas. O app <strong>não</strong> recalcula a regra &mdash; quem decide é quem escreve.</li>
+</ul>
+
+<h2>7. Armadilhas que já custaram tempo</h2>
+
+<p>Esta seção é a razão de a página existir. Todas são reais e todas têm teste ou precedente.</p>
+
+<h3>7.1 Centenas de erros no <code>analyze</code> = codegen velho</h3>
+
+<p>Erro de <code>Undefined name 'state'</code>, <code>Undefined name 'ref'</code> ou provider inexistente <strong>não é código quebrado</strong>: é um <code>*.g.dart</code> que não foi gerado. Um arquivo faltando derruba em cascata todo mundo que usa o provider dele.</p>
+
+<pre><code>make gen        # resolve
+make clean && make gen   # se sobrou .g.dart conflitante depois de renomear classe</code></pre>
+
+<p>Confirmação rápida: o <code>part '&lt;arquivo&gt;.g.dart';</code> existe no fonte e o <code>.g.dart</code> não existe na pasta.</p>
+
+<h3>7.2 <code>AsyncValue.when</code>, nunca <code>switch</code> sobre <code>AsyncData</code>/<code>AsyncError</code></h3>
+
+<p>O Riverpod 3 tenta de novo sozinho quando a requisição falha, e nesse meio-tempo o estado é <code>AsyncLoading</code> <strong>com erro dentro</strong>. Um <code>case AsyncError</code> não casa com isso e a coluna ficaria com o esqueleto na tela para sempre. <code>when</code> olha <code>hasError</code>.</p>
+
+<h3>7.3 Todo botão dentro de uma <code>Row</code> precisa de <code>minimumSize</code> próprio</h3>
+
+<p>O tema define <code>minimumSize: Size.fromHeight(...)</code> para os três tipos de botão (<code>app_theme.dart:159+</code>), e <code>Size.fromHeight</code> é <strong>largura infinita</strong> &mdash; botão de formulário, que ocupa a linha toda. Numa <code>Row</code> isso estoura em <code>BoxConstraints forces an infinite width</code> e <strong>o widget inteiro não renderiza</strong>.</p>
+
+<p>Foi exatamente o que manteve a barra de seleção do quadro invisível desde que ela foi escrita: nenhum teste marcava um card, então ninguém viu.</p>
+
+<h3>7.4 Providers <code>autoDispose</code> em teste</h3>
+
+<p>Controller de folha e de filtro é <code>autoDispose</code>. Em teste que monte a folha sozinha, sem a tela, é preciso um <code>container.listen</code> para o estado sobreviver ao <code>aplicar</code> &mdash; senão o provider é descartado no instante seguinte à escrita e o valor se perde.</p>
+
+<p>O contrário também morde: <code>CrmKanbanRevalidacao</code> é <strong><code>keepAlive</code>, e isso é o ponto todo</strong>. A tela chama <code>conferir()</code> por <code>ref.read</code>, sem observar o resultado; com <code>autoDispose</code> o provider morreria a cada chamada, a referência voltaria a <code>null</code> toda vez e o laço <strong>nunca acharia diferença</strong> &mdash; sem quebrar nada, só não funcionando.</p>
+
+<h3>7.5 <code>pumpAndSettle</code> trava com esqueleto na tela</h3>
+
+<p>A animação do <code>SkeletonBox</code>/<code>SkeletonLine</code> é em laço, então <code>pumpAndSettle</code> nunca retorna. Use <code>pump(Duration)</code>.</p>
+
+<h3>7.6 Abrir uma folha em teste precisa de dois <code>pump</code></h3>
+
+<p>O primeiro só empilha a rota; a animação de entrada começa no frame seguinte, e com um <code>pump</code> só a folha ainda está fora da tela &mdash; o toque cai no vazio e a falha não diz por quê.</p>
+
+<h3>7.7 O rótulo obrigatório carrega o asterisco</h3>
+
+<p><code>CustomTextField</code> e <code>CustomDropdownField</code> desenham o rótulo com <code>Text.rich</code>, e <code>find.text</code> compara o texto plano do span &mdash; então é <code>find.text('Status *')</code>, não <code>'Status'</code>. E <strong>não dá para tocar no rótulo para abrir um seletor</strong>: ele fica FORA da caixa e dentro de um <code>ExcludeSemantics</code>; o caminho é o <code>Semantics</code> que embrulha o campo, que carrega o rótulo <strong>sem</strong> o asterisco.</p>
+
+<h3>7.8 A data viaja como hora de parede</h3>
+
+<p><code>2026-09-13T14:30</code>, sem fuso e sem segundos. <strong>Nada de <code>toIso8601String()</code></strong>: o servidor grava a string crua, e UTC deslocaria o lead três horas em relação ao mesmo lead criado pelo sistema web.</p>
+
+<h3>7.9 Rolagem com o mouse no desktop</h3>
+
+<p><code>AppScrollBehavior</code> acrescenta <code>PointerDeviceKind.mouse</code> aos <code>dragDevices</code>. O padrão do Flutter só aceita arrasto de dispositivos "tipo toque", então no Linux/Windows/macOS o carrossel e as listas <em>parecem travados</em>: segurar o botão e arrastar não rola nada. Em celular não muda nada.</p>
+
+<h3>7.10 <code>compileSdk</code> só quebra no build nativo</h3>
+
+<p>O app compila contra a API <strong>37</strong> (acima do <code>flutter.compileSdkVersion</code>), porque <code>permission_handler</code> e <code>flutter_secure_storage</code> exigem &mdash; sem isso o build falha no <code>checkDebugAarMetadata</code>. E o <code>compileSdkMinor = 0</code> é a parte que costuma faltar: o SDK Manager publica esse nível como <strong><code>android-37.0</code></strong>, e sem o minor o AGP procura <code>android-37</code>, não encontra e falha com <code>Failed to find target with hash string 'android-37'</code>.</p>
+
+<blockquote class="is-warning">
+<p>Ao atualizar dependências, rode <code>flutter build apk --debug</code> <strong>antes de abrir o PR</strong>: erro de <code>compileSdk</code> nunca aparece no <code>flutter analyze</code> nem nos testes.</p>
+</blockquote>
+
+<h2>8. R8: o que quebra só no release</h2>
+
+<p><strong><code>flutter_secure_storage</code> 11 guarda os tokens com Tink</strong> (<code>com.google.crypto.tink:tink-android</code>) e <strong>não traz regras de ProGuard próprias</strong> &mdash; conferido no pub-cache, não há nenhum <code>.pro</code> no <code>android/</code> dele.</p>
+
+<p>O problema não é o R8 <strong>remover</strong>, é o R8 <strong>renomear</strong>: o Tink registra os gerenciadores de chave por nome e desserializa protobuf por reflexão, então com os nomes trocados ele estoura na primeira leitura. Como o R8 só roda no release, o sintoma era o aplicativo travar na splash e terminar em "Não foi possível ler os dados salvos no aparelho" &mdash; com tudo funcionando em desenvolvimento.</p>
+
+<p>As regras estão em <code>android/app/proguard-rules.pro</code>. Para conferir se um plugin sobreviveu com o nome:</p>
+
+<pre><code>~/Android/Sdk/cmdline-tools/latest/bin/apkanalyzer dex packages \
+  build/app/outputs/flutter-apk/app-release.apk | grep -ci tink</code></pre>
+
+<p>Zero significa renomeado (ou ausente). Antes das regras: <code>tink 0</code>, <code>nomads 0</code>; depois: <code>tink 33774</code>, <code>nomads 490</code>.</p>
+
+<blockquote class="is-danger">
+<p><strong>Todo plugin novo que use reflexão</strong> (Gson, protobuf, Tink, serialização por nome de classe) precisa de regra aqui &mdash; e o release é o único lugar onde a falta dela aparece.</p>
+</blockquote>
+
+<h2>9. Publicar</h2>
+
+<h3>Android</h3>
+
+<p>O release só assina de verdade com <code>android/key.properties</code> no lugar (modelo em <code>key.properties.example</code>); sem ele o Gradle cai na chave de debug, para que <code>flutter run --release</code> funcione em máquina sem o keystore.</p>
+
+<blockquote class="is-danger">
+<p>Um APK assim <strong>a Play Store recusa</strong> &mdash; era o estado anterior, conferido com <code>apksigner</code>: <code>CN=Android Debug</code>. O <code>.jks</code> e o <code>key.properties</code> estão no <code>.gitignore</code>, e <strong>perder o keystore significa não conseguir mais publicar atualização</strong>.</p>
+</blockquote>
+
+<h3>iOS</h3>
+
+<p>Exige macOS com Xcode. Falta preencher o <code>DEVELOPMENT_TEAM</code> (hoje <code>CODE_SIGN_STYLE = Automatic</code> com <code>iPhone Developer</code>) e registrar o App ID; o bundle id já é <code>br.com.boomsistemas.aplicaboom</code>, igual ao Android. No primeiro build num Mac: <code>cd ios &amp;&amp; pod install</code> (é este comando que <strong>gera</strong> o <code>Podfile</code>, por isso ele não está no repositório), as macros do <code>permission_handler</code> no <code>Podfile</code> &mdash; sem elas o plugin compila com todas as permissões ligadas e <strong>a Apple rejeita o app</strong> &mdash;, as capabilities de push no Xcode e <code>aps-environment</code> como <code>production</code> no build de distribuição.</p>
+
+<h2>10. Convenções</h2>
+
+<ul>
+<li>Arquivos em <code>snake_case</code>, classes em <code>PascalCase</code>, <strong>um conceito por arquivo</strong>.</li>
+<li><strong><code>class</code></strong> para tudo que os testes precisam mockar (datasources, repositórios, serviços) &mdash; <code>final class</code> impede <code>implements</code> fora da biblioteca e o <code>mocktail</code> deixa de funcionar. <strong><code>final class</code></strong> para hierarquias fechadas (<code>Failure</code>, <code>AppException</code>); <strong><code>abstract interface class</code></strong> para contratos.</li>
+<li><strong>Cor e fonte saem do <code>Theme</code></strong>, nunca escritas na tela. <strong>Espaçamento vem de <code>AppSpacing</code></strong>, não de número solto.</li>
+<li><strong>Rota não se escreve à mão</strong> &mdash; use <code>AppRoute</code>.</li>
+<li><strong><code>BuildContext</code> depois de <code>await</code> exige <code>if (!context.mounted) return;</code></strong> &mdash; o analisador trata como erro, não aviso.</li>
+<li><strong>Nunca inferir nome de coluna</strong> do banco legado: rode <code>DESCRIBE</code> antes. O acesso ao banco é <strong>somente leitura</strong>.</li>
+<li>Commits convencionais, em português: <code>feat(crm): quadro se atualiza sozinho</code>.</li>
+</ul>
+
+<p>Para criar uma feature nova, <code>features/auth/</code> é a referência &mdash; ela tem o caminho completo das nove etapas (entidade &rarr; contrato &rarr; casos de uso &rarr; model &rarr; datasource &rarr; implementação &rarr; providers &rarr; controller &rarr; rota), com <code>make gen</code> e os testes no fim.</p>
+
+<h2>11. Pendências conhecidas</h2>
+
+<ul>
+<li><strong>Firebase/push desligado.</strong> O app roda sem Firebase &mdash; as notificações locais funcionam e o push fica desligado, com aviso no log. Para habilitar, <code>docs/NOTIFICACOES.md</code>.</li>
+<li><strong>Staging não existe.</strong> O <code>env/staging.json</code> aponta para um host inexistente; quando houver staging, provavelmente seguirá o mesmo padrão de caminho no Kong.</li>
+<li><strong>Contraste do ciano</strong> abaixo do WCAG AA (2,9:1), e a cor de aviso ainda não-oficial.</li>
+<li><strong>Distribuição automática de lead</strong> (o rodízio que a loja usa para repartir os leads que chegam sozinhos) continua só no legado. A criação manual nunca passou por ele, nem lá.</li>
+<li><strong>Quem recebe lead por atribuição em lote feita pelo app não é avisado</strong> &mdash; a API não tem push nem socket, e pela web o legado dispara notificação. Pendência da API, não do app.</li>
+</ul>
